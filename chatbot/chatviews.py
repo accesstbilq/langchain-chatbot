@@ -11,14 +11,16 @@ from dotenv import load_dotenv
 from datetime import datetime
 import mimetypes
 import uuid
+from django.http import StreamingHttpResponse
 
 from bs4 import BeautifulSoup
 
 from langchain_openai import ChatOpenAI
 from langchain.schema import SystemMessage, AIMessage, BaseMessage
-from langchain_core.messages import ToolMessage,HumanMessage
+from langchain_core.messages import ToolMessage,HumanMessage,AIMessageChunk
 from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain.tools import tool
+from openai import OpenAIError, APITimeoutError
 
 # Global variables for chat system and messages
 chat_system = ""
@@ -239,20 +241,138 @@ def delete_document(request):
             'error': f"Error deleting document: {str(e)}"
         })
 
+# @csrf_exempt
+# def chatbot_input(request):
+#     """SEO-focused chatbot with arithmetic tool support"""
+#     global chat_system
+
+#     if not hasattr(request, 'POST') or request.method != 'POST':
+#         return JsonResponse({'success': False, 'error': 'Only POST requests are allowed'})
+#     data = json.loads(request.body.decode('utf-8'))
+#     usermessage = data.get("message", "")
+#     #usermessage = request.POST.get('message', '').strip()
+#     if not usermessage:
+#         return JsonResponse({'success': False, 'error': 'No message provided'})
+
+#     try:
+#         # SEO + arithmetic tool
+#         tools = [multiply, validate_and_fetch_url]
+
+#         llm = ChatOpenAI(
+#             temperature=0.7,
+#             openai_api_key=OPENAIKEY,
+#             model="gpt-3.5-turbo"
+
+#         )
+#         llm_with_tools = llm.bind_tools(tools)
+#         chat_system = "LLM Call"
+                
+#         # Initial messages
+#         messages = [
+#             SystemMessage(content=system_message),
+#             HumanMessage(content=usermessage)
+#         ]
+
+#         # Get initial AI response
+#         ai_msg = llm_with_tools.invoke(messages)  
+
+#         # Process tool calls if any
+#         if ai_msg.tool_calls:
+#             messages.append(ai_msg)
+        
+#             print(f"AI Response: {ai_msg}")
+#             print(f"Tool calls: {ai_msg.tool_calls}")
+#             tool_mapping = {
+#                 "multiply": multiply,
+#                 "validate_and_fetch_url": validate_and_fetch_url
+#             }
+
+#             for tool_call in ai_msg.tool_calls:
+#                 tool_name = tool_call["name"]
+#                 tool_args = tool_call["args"]
+#                 tool_call_id = tool_call["id"]
+                
+#                 print(f"Processing tool call: {tool_name} with args: {tool_args}")
+                
+#                 if tool_name in tool_mapping:
+#                     selected_tool = tool_mapping[tool_name]
+#                     try:
+#                         # Run the tool with args
+#                         tool_result = selected_tool.invoke(tool_args)
+#                         print(f"Tool result: {tool_result}")
+                        
+#                         # Append ToolMessage with matching tool_call_id
+#                         messages.append(
+#                             ToolMessage(content=str(tool_result), tool_call_id=tool_call_id)
+#                         )
+#                     except Exception as e:
+#                         print(f"Error running tool {tool_name}: {str(e)}")
+#                         messages.append(
+#                             ToolMessage(content=f"❌ Error running tool {tool_name}: {str(e)}", tool_call_id=tool_call_id)
+#                         )
+#                 else:
+#                     messages.append(
+#                         ToolMessage(content=f"Unknown tool: {tool_name}", tool_call_id=tool_call_id)
+#                     )
+            
+#             # Get final response after tool execution
+#             #final_response = llm_with_tools.invoke(messages)
+
+#             def stream_response():
+#                 try:
+#                     for chunk in llm_with_tools.stream(messages):
+#                         if isinstance(chunk, AIMessageChunk):
+#                             yield chunk.content
+#                 except (OpenAIError, APITimeoutError) as e:
+#                     yield f"\n[Error occurred: {str(e)}]"
+
+#             return StreamingHttpResponse(stream_response(), content_type='text/plain')
+
+
+#             print(f"Final response: {final_response}")
+#         else:
+#             # No tools called, use initial response
+#             #final_response = ai_msg
+#             def stream_response():
+#                 try:
+#                     for chunk in llm_with_tools.stream(messages):
+#                         if isinstance(chunk, AIMessageChunk):
+#                             yield chunk.content
+#                 except (OpenAIError, APITimeoutError) as e:
+#                     yield f"\n[Error occurred: {str(e)}]"
+
+#             return StreamingHttpResponse(stream_response(), content_type='text/plain')
+        
+
+#     except Exception as e:
+#         traceback.print_exc()
+#         return JsonResponse({
+#             'success': False,
+#             'error': f'Processing error: {str(e)}'
+#         })
+
+
+
+# Add this at the top with other global variables
+chat_history = {}  # Store chat history by session
+
 @csrf_exempt
 def chatbot_input(request):
-    """SEO-focused chatbot with arithmetic tool support"""
-    global chat_system
+    """SEO-focused chatbot with arithmetic tool support and chat history"""
+    global chat_system, chat_history
 
     if not hasattr(request, 'POST') or request.method != 'POST':
         return JsonResponse({'success': False, 'error': 'Only POST requests are allowed'})
-
-    usermessage = request.POST.get('message', '').strip()
+    
+    data = json.loads(request.body.decode('utf-8'))
+    usermessage = data.get("message", "")
+    session_id = data.get("session_id", "default")  # Get session ID from frontend
+    
     if not usermessage:
         return JsonResponse({'success': False, 'error': 'No message provided'})
 
     try:
-        # SEO + arithmetic tool
+        # SEO + arithmetic tools
         tools = [multiply, validate_and_fetch_url]
 
         llm = ChatOpenAI(
@@ -262,22 +382,27 @@ def chatbot_input(request):
         )
         llm_with_tools = llm.bind_tools(tools)
         chat_system = "LLM Call"
-                
-        # Initial messages
-        messages = [
-            SystemMessage(content=system_message),
-            HumanMessage(content=usermessage)
-        ]
+        
+        # Initialize or get existing chat history for this session
+        if session_id not in chat_history:
+            chat_history[session_id] = [SystemMessage(content=system_message)]
+        
+        # Get current conversation messages
+        messages = chat_history[session_id].copy()
+        
+        # Add the new user message
+        messages.append(HumanMessage(content=usermessage))
 
         # Get initial AI response
         ai_msg = llm_with_tools.invoke(messages)
-        messages.append(ai_msg)
         
-        print(f"AI Response: {ai_msg}")
-        print(f"Tool calls: {ai_msg.tool_calls}")
-
         # Process tool calls if any
         if ai_msg.tool_calls:
+            messages.append(ai_msg)
+            
+            print(f"AI Response: {ai_msg}")
+            print(f"Tool calls: {ai_msg.tool_calls}")
+            
             tool_mapping = {
                 "multiply": multiply,
                 "validate_and_fetch_url": validate_and_fetch_url
@@ -304,36 +429,54 @@ def chatbot_input(request):
                     except Exception as e:
                         print(f"Error running tool {tool_name}: {str(e)}")
                         messages.append(
-                            ToolMessage(content=f"❌ Error running tool {tool_name}: {str(e)}", tool_call_id=tool_call_id)
+                            ToolMessage(content=f"⚠ Error running tool {tool_name}: {str(e)}", tool_call_id=tool_call_id)
                         )
                 else:
                     messages.append(
                         ToolMessage(content=f"Unknown tool: {tool_name}", tool_call_id=tool_call_id)
                     )
             
-            # Get final response after tool execution
-            final_response = llm_with_tools.invoke(messages)
-            print(f"Final response: {final_response}")
-        else:
-            # No tools called, use initial response
-            final_response = ai_msg
+            # Store the conversation history (user message + AI response + tool messages)
+            chat_history[session_id].append(HumanMessage(content=usermessage))
+            chat_history[session_id].extend(messages[len(chat_history[session_id]):])
+            
+            def stream_response():
+                try:
+                    final_response_content = ""
+                    for chunk in llm_with_tools.stream(messages):
+                        if isinstance(chunk, AIMessageChunk) and chunk.content:
+                            final_response_content += chunk.content
+                            yield chunk.content
+                    
+                    # Store the final AI response in chat history
+                    if final_response_content:
+                        chat_history[session_id].append(AIMessage(content=final_response_content))
+                        
+                except (OpenAIError, APITimeoutError) as e:
+                    yield f"\n[Error occurred: {str(e)}]"
 
-        return JsonResponse({
-            'success': True,
-            'response': final_response.content,
-            'session_id': "12345",
-            'message_id': "12345",
-            'response_meta': {
-                'source': chat_system,
-                'response_type': 'Tool Usage' if ai_msg.tool_calls else 'General Conversation',
-                'has_vectorstore': False,
-                'tools_used': len(ai_msg.tool_calls) > 0 if ai_msg.tool_calls else False,
-                'tool_calls_made': [tc["name"] for tc in ai_msg.tool_calls] if ai_msg.tool_calls else [],
-                'total_tokens': final_response.usage_metadata.get("total_tokens", 0),
-                'input_tokens': final_response.usage_metadata.get("input_tokens", 0),
-                'output_tokens': final_response.usage_metadata.get("output_tokens", 0)
-            }
-        })
+            return StreamingHttpResponse(stream_response(), content_type='text/plain')
+
+        else:
+            # No tools called, store conversation and stream response
+            chat_history[session_id].append(HumanMessage(content=usermessage))
+            
+            def stream_response():
+                try:
+                    final_response_content = ""
+                    for chunk in llm_with_tools.stream(messages):
+                        if isinstance(chunk, AIMessageChunk) and chunk.content:
+                            final_response_content += chunk.content
+                            yield chunk.content
+                    
+                    # Store the final AI response in chat history
+                    if final_response_content:
+                        chat_history[session_id].append(AIMessage(content=final_response_content))
+                        
+                except (OpenAIError, APITimeoutError) as e:
+                    yield f"\n[Error occurred: {str(e)}]"
+
+            return StreamingHttpResponse(stream_response(), content_type='text/plain')
 
     except Exception as e:
         traceback.print_exc()
