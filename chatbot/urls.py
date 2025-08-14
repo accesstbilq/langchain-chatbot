@@ -3,7 +3,8 @@ from . import views
 from . import chatviews
 
 urlpatterns = [
-    path('', views.chatbot_view, name='chat'),
+    #path('', views.chatbot_view, name='chat'),
+    path('', chatviews.dashboard_view, name='dashboard'),
     path('chatbot/', chatviews.chatbot_view, name='chatbot'),
     path('chat-input/', chatviews.chatbot_input, name='chatbot-input'),
     path('get-response/', views.validate_url_view, name='get_message'),

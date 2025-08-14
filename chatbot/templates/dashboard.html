@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        {% load static %}
+        <meta charset="UTF-8">
+        <title>Chat with Bot</title>
+        <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+        <link rel="stylesheet" href="{% static 'css/styles.css' %}">
+    </head>
+    <body>
+        <div class="main-container">
+            <!-- Sidebar with MetaData and Document Upload -->
+            <div class="sidebar" style="display: flex;flex-direction: column;gap: 10px;max-width: 700px;width: 100%;margin: auto;">
+                <!-- Document Upload Section -->
+                <div class="document-upload-section">
+                    <div class="upload-header">
+                        Dashboard
+                    </div>
+                    <div class="upload-content">
+                       <!-- Documents List -->
+                        <div class="documents-list">
+                            <h4 style="margin-bottom: 10px; font-size: 14px; color: #495057;"><a href="/chatbot/" style="text-decoration:none;font-weight: 500;color: black;" target="_blank">🤖 Chatbot</a></h4>
+                            <h4 style="margin-bottom: 10px; font-size: 14px; color: #495057;"><a href="/document/" style="text-decoration:none;font-weight: 500;color: black;" target="_blank">📋 Uploaded Documents</a></h4>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+
+        </div>
+    </body>
+</html>

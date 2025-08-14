@@ -121,6 +121,9 @@ def chatbot_view(request):
 def document_view(request):
     return render(request, 'document.html')
 
+def dashboard_view(request):
+    return render(request, 'dashboard.html')
+
 @csrf_exempt
 def upload_documents(request):
     """Handle multiple document uploads"""
