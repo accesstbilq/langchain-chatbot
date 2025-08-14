@@ -7,6 +7,7 @@ urlpatterns = [
     path('chatbot/', chatviews.chatbot_view, name='chatbot'),
     path('chat-input/', chatviews.chatbot_input, name='chatbot-input'),
     path('get-response/', views.validate_url_view, name='get_message'),
+    path('get-token-usage/<str:run_id>/', chatviews.get_token_usage_view, name='get_token_usage'),
 
     # New chat history endpoints
     path('chat-history/', views.get_chat_history_view, name='get_chat_history'),

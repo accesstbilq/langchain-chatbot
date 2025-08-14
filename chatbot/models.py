@@ -1,93 +1,99 @@
 from django.db import models
 from django.conf import settings
 
+from django.contrib.auth.models import User
+import json
+from django.utils import timezone
+
 class ChatSession(models.Model):
-    # Unique identifier for the session (could be based on browser session or token)
-    session_key = models.CharField(max_length=255, unique=True)
-
-    # Timestamp when the session was created
+    """Model to store chat sessions"""
+    session_id = models.CharField(max_length=100, unique=True, db_index=True)
+    run_id = models.CharField(max_length=100, blank=True, db_index=True)  # Track conversation runs
+    user = models.ForeignKey(User, on_delete=models.CASCADE, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
-
-    # Timestamp when the session was last updated
     updated_at = models.DateTimeField(auto_now=True)
-
-    # List of processed URLs for this session (optional)
-    processed_urls = models.JSONField(default=list, blank=True)
-
-    # Associated user (optional, can be null for anonymous users)
-    user = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.CASCADE,
-        null=True,
-        blank=True
-    )
-
+    is_active = models.BooleanField(default=True)
+    title = models.CharField(max_length=200, blank=True)  # Optional session title
+    
+    class Meta:
+        ordering = ['-updated_at']
+    
     def __str__(self):
-        return f"Session {self.session_key}"
-
-
-class ProcessedURL(models.Model):
-    # Choices to track the URL processing status
-    STATUS_CHOICES = [
-        ('processing', 'Processing'),
-        ('success', 'Success'),
-        ('failed', 'Failed'),
-    ]
-
-    # The original URL submitted for processing
-    url = models.URLField()
-
-    # The title extracted from the URL (if available)
-    title = models.CharField(max_length=500, blank=True)
-
-    # Status of processing (processing/success/failed)
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES)
-
-    # Details about processing result or errors (JSON object)
-    processing_details = models.JSONField(default=dict, blank=True)
-
-    # Timestamp of when the URL was processed
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    # Reference to the related chat session
-    session = models.ForeignKey(
-        ChatSession,
-        related_name='urls',
-        on_delete=models.CASCADE
-    )
-
-    def __str__(self):
-        return f"{self.url} - {self.status}"
+        return f"Session {self.session_id} - {self.created_at}"
 
 class ChatMessage(models.Model):
-    # Role indicates whether the message is from user or assistant
-    ROLE_CHOICES = [
-        ('user', 'User'),
-        ('assistant', 'Assistant'),
-    ]
-
-    # Role of the message sender (user or assistant)
-    role = models.CharField(max_length=20, choices=ROLE_CHOICES)
-
-    # The actual message content
-    content = models.TextField()
-
-    # Any associated source links or metadata (optional)
-    sources = models.JSONField(default=list, blank=True)
-
-    # Timestamp of when the message was created
-    timestamp = models.DateTimeField(auto_now_add=True)
-
-    # Reference to the related chat session
-    session = models.ForeignKey(
-        ChatSession,
-        related_name='messages',
-        on_delete=models.CASCADE
+    """Model to store individual chat messages"""
+    MESSAGE_TYPES = (
+        ('system', 'System'),
+        ('human', 'Human'),
+        ('ai', 'AI'),
+        ('tool', 'Tool'),
     )
-
-    # Default ordering by timestamp (oldest to newest)
+    
+    session = models.ForeignKey(ChatSession, on_delete=models.CASCADE, related_name='messages')
+    message_id = models.CharField(max_length=100, unique=True, db_index=True)  # Unique message identifier
+    run_id = models.CharField(max_length=100, blank=True, db_index=True)  # Link to conversation run
+    message_type = models.CharField(max_length=10, choices=MESSAGE_TYPES)
+    content = models.TextField()
+    tool_call_id = models.CharField(max_length=100, blank=True, null=True)  # For tool messages
+    tool_calls = models.JSONField(default=dict, blank=True)  # Store tool calls data
+    metadata = models.JSONField(default=dict, blank=True)  # Store additional metadata
+    created_at = models.DateTimeField(auto_now_add=True)
+    order = models.PositiveIntegerField()  # To maintain message order
+    
     class Meta:
-        ordering = ['timestamp']
-
+        ordering = ['session', 'order']
+        indexes = [
+            models.Index(fields=['session', 'order']),
+            models.Index(fields=['session', 'created_at']),
+            models.Index(fields=['message_id']),
+            models.Index(fields=['run_id']),
+            models.Index(fields=['session', 'run_id']),
+        ]
+    
     def __str__(self):
-        return f"[{self.timestamp}] {self.role}: {self.content[:50]}"
+        return f"{self.message_type}: {self.content[:50]}..."
+
+class DocumentUpload(models.Model):
+    """Model to store uploaded documents metadata"""
+    document_id = models.CharField(max_length=100, unique=True, db_index=True)
+    session = models.ForeignKey(ChatSession, on_delete=models.CASCADE, related_name='documents', null=True, blank=True)
+    original_name = models.CharField(max_length=255)
+    file_name = models.CharField(max_length=255)
+    file_path = models.CharField(max_length=500)
+    file_size = models.BigIntegerField()
+    file_type = models.CharField(max_length=10)
+    mime_type = models.CharField(max_length=100)
+    upload_date = models.DateTimeField(auto_now_add=True)
+    is_processed = models.BooleanField(default=False)
+    processing_status = models.CharField(max_length=50, default='pending')
+    
+    class Meta:
+        ordering = ['-upload_date']
+    
+    def __str__(self):
+        return f"{self.original_name} ({self.file_type})"
+    
+
+class TokenUsage(models.Model):
+    session = models.ForeignKey(ChatSession, on_delete=models.CASCADE, related_name='token_usages', null=True, blank=True)
+    run_id = models.CharField(max_length=100, db_index=True)
+    message_id = models.CharField(max_length=100, null=True, blank=True)
+    response_type = models.CharField(max_length=100, null=True, blank=True)
+    tools_used = models.CharField(max_length=100, null=True, blank=True)
+    source = models.CharField(max_length=100, null=True, blank=True)
+    input_tokens = models.IntegerField(default=0)
+    output_tokens = models.IntegerField(default=0)
+    total_tokens = models.IntegerField(default=0)
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        unique_together = ['session', 'run_id']
+        indexes = [
+            models.Index(fields=['run_id']),
+            models.Index(fields=['created_at']),
+        ]
+    
+    def __str__(self):
+        return f"Tokens for Run {self.run_id}: {self.total_tokens}"

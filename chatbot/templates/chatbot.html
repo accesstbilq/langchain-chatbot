@@ -59,10 +59,43 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ message: userInput,session_id: sessionId })
                 }).then(response => {
+                    const runId = response.headers.get('x-run-id');
+                    console.log('x-run-id:', runId);
+                    
+                    // You can store it in a variable or use it as needed
+                    // For example, store it globally or in a data attribute
+                    window.currentRunId = runId;
+
+
+
+
                     const reader = response.body.getReader();
+
                     function read() {
                         reader.read().then(({ done, value }) => {
-                            if (done) return;
+                            if (done) {
+                                // ✅ When done streaming, get token usage
+                                if (window.currentRunId) {
+                                    $.get(`/get-token-usage/${window.currentRunId}/`, function(data) {
+                                        console.log("Token usage:", data);
+                                        // You can display this in your UI
+                                        let metadataHtml = `
+                                                <p>Response Type: ${data.response_type}</p>
+                                                <p>Source: ${data.source}</p>
+                                                <p>Total Tokens: ${data.total_tokens}</p>
+                                                <p>Input Tokens: ${data.input_tokens}</p>
+                                                <p>Output Tokens: ${data.output_tokens}</p>
+                                                <p>Session Id: ${data.session}</p>
+                                                <p>Run Id: ${data.run_id}</p>
+                                                <p>Message Id: ${data.message_id}</p>
+                                            `;
+                                            $('.metadata').html(metadataHtml);
+                                    }).fail(err => {
+                                        console.error("Failed to fetch token usage", err);
+                                    });
+                                }
+                                return;
+                            }
                             const chunk = decoder.decode(value, { stream: true });
                             result += chunk;
                             agentChatDiv.innerHTML += chunk.replace(/\n/g, "<br>");

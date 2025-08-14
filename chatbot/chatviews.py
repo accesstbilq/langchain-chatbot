@@ -22,6 +22,20 @@ from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain.tools import tool
 from openai import OpenAIError, APITimeoutError
 
+# Import database utilities
+from .chat_utils import (
+    get_or_create_chat_session, 
+    save_message_to_db, 
+    load_chat_history_from_db,
+    generate_run_id,
+    generate_message_id,
+    count_tokens,
+    count_tokens_from_string,
+    save_token_usage,
+    get_token_usage
+)
+
+
 # Global variables for chat system and messages
 chat_system = ""
 messages = []
@@ -162,6 +176,12 @@ def upload_documents(request):
             }
             
             uploaded_documents[unique_id] = doc_info
+
+
+
+
+
+
             uploaded_files.append({
                 'id': unique_id,
                 'name': file.name,
@@ -240,137 +260,44 @@ def delete_document(request):
             'success': False,
             'error': f"Error deleting document: {str(e)}"
         })
-
-# @csrf_exempt
-# def chatbot_input(request):
-#     """SEO-focused chatbot with arithmetic tool support"""
-#     global chat_system
-
-#     if not hasattr(request, 'POST') or request.method != 'POST':
-#         return JsonResponse({'success': False, 'error': 'Only POST requests are allowed'})
-#     data = json.loads(request.body.decode('utf-8'))
-#     usermessage = data.get("message", "")
-#     #usermessage = request.POST.get('message', '').strip()
-#     if not usermessage:
-#         return JsonResponse({'success': False, 'error': 'No message provided'})
-
-#     try:
-#         # SEO + arithmetic tool
-#         tools = [multiply, validate_and_fetch_url]
-
-#         llm = ChatOpenAI(
-#             temperature=0.7,
-#             openai_api_key=OPENAIKEY,
-#             model="gpt-3.5-turbo"
-
-#         )
-#         llm_with_tools = llm.bind_tools(tools)
-#         chat_system = "LLM Call"
-                
-#         # Initial messages
-#         messages = [
-#             SystemMessage(content=system_message),
-#             HumanMessage(content=usermessage)
-#         ]
-
-#         # Get initial AI response
-#         ai_msg = llm_with_tools.invoke(messages)  
-
-#         # Process tool calls if any
-#         if ai_msg.tool_calls:
-#             messages.append(ai_msg)
-        
-#             print(f"AI Response: {ai_msg}")
-#             print(f"Tool calls: {ai_msg.tool_calls}")
-#             tool_mapping = {
-#                 "multiply": multiply,
-#                 "validate_and_fetch_url": validate_and_fetch_url
-#             }
-
-#             for tool_call in ai_msg.tool_calls:
-#                 tool_name = tool_call["name"]
-#                 tool_args = tool_call["args"]
-#                 tool_call_id = tool_call["id"]
-                
-#                 print(f"Processing tool call: {tool_name} with args: {tool_args}")
-                
-#                 if tool_name in tool_mapping:
-#                     selected_tool = tool_mapping[tool_name]
-#                     try:
-#                         # Run the tool with args
-#                         tool_result = selected_tool.invoke(tool_args)
-#                         print(f"Tool result: {tool_result}")
-                        
-#                         # Append ToolMessage with matching tool_call_id
-#                         messages.append(
-#                             ToolMessage(content=str(tool_result), tool_call_id=tool_call_id)
-#                         )
-#                     except Exception as e:
-#                         print(f"Error running tool {tool_name}: {str(e)}")
-#                         messages.append(
-#                             ToolMessage(content=f"❌ Error running tool {tool_name}: {str(e)}", tool_call_id=tool_call_id)
-#                         )
-#                 else:
-#                     messages.append(
-#                         ToolMessage(content=f"Unknown tool: {tool_name}", tool_call_id=tool_call_id)
-#                     )
-            
-#             # Get final response after tool execution
-#             #final_response = llm_with_tools.invoke(messages)
-
-#             def stream_response():
-#                 try:
-#                     for chunk in llm_with_tools.stream(messages):
-#                         if isinstance(chunk, AIMessageChunk):
-#                             yield chunk.content
-#                 except (OpenAIError, APITimeoutError) as e:
-#                     yield f"\n[Error occurred: {str(e)}]"
-
-#             return StreamingHttpResponse(stream_response(), content_type='text/plain')
-
-
-#             print(f"Final response: {final_response}")
-#         else:
-#             # No tools called, use initial response
-#             #final_response = ai_msg
-#             def stream_response():
-#                 try:
-#                     for chunk in llm_with_tools.stream(messages):
-#                         if isinstance(chunk, AIMessageChunk):
-#                             yield chunk.content
-#                 except (OpenAIError, APITimeoutError) as e:
-#                     yield f"\n[Error occurred: {str(e)}]"
-
-#             return StreamingHttpResponse(stream_response(), content_type='text/plain')
-        
-
-#     except Exception as e:
-#         traceback.print_exc()
-#         return JsonResponse({
-#             'success': False,
-#             'error': f'Processing error: {str(e)}'
-#         })
-
-
+    
 
 # Add this at the top with other global variables
 chat_history = {}  # Store chat history by session
 
+def get_token_usage_view(request, run_id):
+    token_usage = get_token_usage(run_id=run_id)
+    return JsonResponse({
+        'response_type': token_usage.response_type,
+        'tools_used': token_usage.tools_used,
+        'source': token_usage.source,
+        'message_id': token_usage.message_id,
+        'run_id': token_usage.run_id,
+        'session': token_usage.session.session_id,
+        'input_tokens': token_usage.input_tokens,
+        'output_tokens': token_usage.output_tokens,
+        'total_tokens': token_usage.total_tokens
+    })
+
 @csrf_exempt
 def chatbot_input(request):
-    """SEO-focused chatbot with arithmetic tool support and chat history"""
-    global chat_system, chat_history
+    """SEO-focused chatbot with database-backed chat history"""
+    global chat_system
 
     if not hasattr(request, 'POST') or request.method != 'POST':
         return JsonResponse({'success': False, 'error': 'Only POST requests are allowed'})
     
     data = json.loads(request.body.decode('utf-8'))
     usermessage = data.get("message", "")
-    session_id = data.get("session_id", "default")  # Get session ID from frontend
+    session_id = data.get("session_id", "default")
+    run_id = data.get("run_id", None)  # Optional run_id from frontend
+    user = request.user if request.user.is_authenticated else None
     
     if not usermessage:
         return JsonResponse({'success': False, 'error': 'No message provided'})
 
+    # Track token usage for streaming response
+    output_token_count = 0
     try:
         # SEO + arithmetic tools
         tools = [multiply, validate_and_fetch_url]
@@ -383,26 +310,62 @@ def chatbot_input(request):
         llm_with_tools = llm.bind_tools(tools)
         chat_system = "LLM Call"
         
-        # Initialize or get existing chat history for this session
-        if session_id not in chat_history:
-            chat_history[session_id] = [SystemMessage(content=system_message)]
+        # Get or create chat session in database
+        session, created = get_or_create_chat_session(session_id, user, run_id)
         
-        # Get current conversation messages
-        messages = chat_history[session_id].copy()
+        # Generate new run_id if not provided
+        current_run_id = run_id or session.run_id or generate_run_id()
+        
+        # Load existing chat history from database
+        messages = load_chat_history_from_db(session_id)
+        
+        # If no messages exist or this is a new session, start with system message
+        if not messages or created:
+            system_msg = SystemMessage(content=system_message)
+            save_message_to_db(
+                session, 
+                'system', 
+                system_message, 
+                run_id=current_run_id,
+                message_id=generate_message_id()
+            )
+            messages = [system_msg]
         
         # Add the new user message
-        messages.append(HumanMessage(content=usermessage))
+        user_msg = HumanMessage(content=usermessage)
+        messages.append(user_msg)
+
+        # Count input tokens
+        input_tokens = count_tokens(messages)
+
+        save_message_to_db(
+            session, 
+            'human', 
+            usermessage, 
+            run_id=current_run_id,
+            message_id=generate_message_id()
+        )
 
         # Get initial AI response
         ai_msg = llm_with_tools.invoke(messages)
         
+        
+
         # Process tool calls if any
         if ai_msg.tool_calls:
             messages.append(ai_msg)
             
-            print(f"AI Response: {ai_msg}")
-            print(f"Tool calls: {ai_msg.tool_calls}")
+            # Save AI message with tool calls to database
+            save_message_to_db(
+                session, 
+                'ai', 
+                ai_msg.content, 
+                tool_calls=ai_msg.tool_calls,
+                run_id=current_run_id,
+                message_id=generate_message_id()
+            )
             
+            # Process tool calls...
             tool_mapping = {
                 "multiply": multiply,
                 "validate_and_fetch_url": validate_and_fetch_url
@@ -423,60 +386,145 @@ def chatbot_input(request):
                         print(f"Tool result: {tool_result}")
                         
                         # Append ToolMessage with matching tool_call_id
-                        messages.append(
-                            ToolMessage(content=str(tool_result), tool_call_id=tool_call_id)
+                        tool_message = ToolMessage(
+                            content=str(tool_result), 
+                            tool_call_id=tool_call_id
                         )
+                        messages.append(tool_message)
+                        
+                        # Save tool message to database
+                        save_message_to_db(
+                            session, 
+                            'tool', 
+                            str(tool_result), 
+                            tool_call_id=tool_call_id,
+                            run_id=current_run_id,
+                            message_id=generate_message_id()
+                        )
+                        
                     except Exception as e:
                         print(f"Error running tool {tool_name}: {str(e)}")
-                        messages.append(
-                            ToolMessage(content=f"⚠ Error running tool {tool_name}: {str(e)}", tool_call_id=tool_call_id)
+                        error_content = f"⚠ Error running tool {tool_name}: {str(e)}"
+                        error_message = ToolMessage(
+                            content=error_content, 
+                            tool_call_id=tool_call_id
+                        )
+                        messages.append(error_message)
+                        
+                        # Save error message to database
+                        save_message_to_db(
+                            session, 
+                            'tool', 
+                            error_content, 
+                            tool_call_id=tool_call_id,
+                            run_id=current_run_id,
+                            message_id=generate_message_id()
                         )
                 else:
-                    messages.append(
-                        ToolMessage(content=f"Unknown tool: {tool_name}", tool_call_id=tool_call_id)
+                    error_content = f"Unknown tool: {tool_name}"
+                    error_message = ToolMessage(
+                        content=error_content, 
+                        tool_call_id=tool_call_id
+                    )
+                    messages.append(error_message)
+                    
+                    # Save error message to database
+                    save_message_to_db(
+                        session, 
+                        'tool', 
+                        error_content, 
+                        tool_call_id=tool_call_id,
+                        run_id=current_run_id,
+                        message_id=generate_message_id()
                     )
             
-            # Store the conversation history (user message + AI response + tool messages)
-            chat_history[session_id].append(HumanMessage(content=usermessage))
-            chat_history[session_id].extend(messages[len(chat_history[session_id]):])
-            
             def stream_response():
+                nonlocal output_token_count
                 try:
                     final_response_content = ""
                     for chunk in llm_with_tools.stream(messages):
                         if isinstance(chunk, AIMessageChunk) and chunk.content:
                             final_response_content += chunk.content
+                            # Count tokens in this chunk
+                            chunk_tokens = count_tokens_from_string(chunk.content)
+                            output_token_count += chunk_tokens
                             yield chunk.content
                     
-                    # Store the final AI response in chat history
+                    # Save the final AI response to database
                     if final_response_content:
-                        chat_history[session_id].append(AIMessage(content=final_response_content))
-                        
+                        savemessage = save_message_to_db(
+                            session, 
+                            'ai', 
+                            final_response_content,
+                            run_id=current_run_id,
+                            message_id=generate_message_id()
+                        )
+                        # Save token usage
+                        total_tokens = input_tokens + output_token_count
+                        response_type='Tool Usage' if ai_msg.tool_calls else 'General Conversation'
+                        tools_used=len(ai_msg.tool_calls) > 0 if ai_msg.tool_calls else False
+                        source=chat_system
+                        save_token_usage(session, current_run_id, input_tokens, output_token_count, total_tokens,response_type,tools_used,source,savemessage)
                 except (OpenAIError, APITimeoutError) as e:
-                    yield f"\n[Error occurred: {str(e)}]"
+                    error_msg = f"\n[Error occurred: {str(e)}]"
+                    save_message_to_db(
+                        session, 
+                        'ai', 
+                        error_msg,
+                        run_id=current_run_id,
+                        message_id=generate_message_id()
+                    )
+                    yield error_msg
 
-            return StreamingHttpResponse(stream_response(), content_type='text/plain')
+            streaming_response =  StreamingHttpResponse(stream_response(), content_type='text/plain')
+            streaming_response['X-Run-ID'] = current_run_id  # Add as header
+            return streaming_response
 
         else:
-            # No tools called, store conversation and stream response
-            chat_history[session_id].append(HumanMessage(content=usermessage))
-            
+            # No tools called, stream response directly
             def stream_response():
                 try:
+                    nonlocal output_token_count
                     final_response_content = ""
                     for chunk in llm_with_tools.stream(messages):
                         if isinstance(chunk, AIMessageChunk) and chunk.content:
                             final_response_content += chunk.content
+                            # Count tokens in this chunk
+                            chunk_tokens = count_tokens_from_string(chunk.content)
+                            output_token_count += chunk_tokens
                             yield chunk.content
                     
-                    # Store the final AI response in chat history
+                    # Save the final AI response to database
                     if final_response_content:
-                        chat_history[session_id].append(AIMessage(content=final_response_content))
-                        
-                except (OpenAIError, APITimeoutError) as e:
-                    yield f"\n[Error occurred: {str(e)}]"
+                        savemessage = save_message_to_db(
+                            session, 
+                            'ai', 
+                            final_response_content,
+                            run_id=current_run_id,
+                            message_id=generate_message_id()
+                        )
+                        # Save token usage
+                        total_tokens = input_tokens + output_token_count
 
-            return StreamingHttpResponse(stream_response(), content_type='text/plain')
+                        response_type='Tool Usage' if ai_msg.tool_calls else 'General Conversation'
+                        tools_used=len(ai_msg.tool_calls) > 0 if ai_msg.tool_calls else False
+                        source=chat_system
+                        save_token_usage(session, current_run_id, input_tokens, output_token_count, total_tokens,response_type,tools_used,source,savemessage)
+
+                except (OpenAIError, APITimeoutError) as e:
+                    error_msg = f"\n[Error occurred: {str(e)}]"
+                    save_message_to_db(
+                        session, 
+                        'ai', 
+                        error_msg,
+                        run_id=current_run_id,
+                        message_id=generate_message_id()
+                    )
+                    yield error_msg
+
+            streaming_response =  StreamingHttpResponse(stream_response(), content_type='text/plain')
+            streaming_response['X-Run-ID'] = current_run_id  # Add as header
+            return streaming_response
 
     except Exception as e:
         traceback.print_exc()
