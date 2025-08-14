@@ -44,6 +44,8 @@ messages = []
 load_dotenv()
 OPENAIKEY = os.getenv('OPEN_AI_KEY')
 
+MODEL = "gpt-3.5-turbo"
+
 # Document storage configuration
 UPLOAD_DIR = os.path.join(settings.MEDIA_ROOT, 'documents')
 if not os.path.exists(UPLOAD_DIR):
@@ -305,7 +307,7 @@ def chatbot_input(request):
         llm = ChatOpenAI(
             temperature=0.7,
             openai_api_key=OPENAIKEY,
-            model="gpt-3.5-turbo"
+            model=MODEL
         )
         llm_with_tools = llm.bind_tools(tools)
         chat_system = "LLM Call"

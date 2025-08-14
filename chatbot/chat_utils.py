@@ -4,8 +4,10 @@ from langchain_core.messages import ToolMessage
 from .models import ChatSession, ChatMessage, TokenUsage
 import json
 import tiktoken
-
 import uuid
+
+# Load ENV file
+MODEL = "gpt-3.5-turbo"
 
 def generate_run_id():
     """Generate a unique run ID for conversation tracking"""
@@ -127,7 +129,7 @@ def count_tokens(messages, model="gpt-3.5-turbo"):
     num_tokens += 3  # every reply is primed with <|start|>assistant<|message|>
     return num_tokens
 
-def count_tokens_from_string(text, model="gpt-3.5-turbo"):
+def count_tokens_from_string(text, model=MODEL):
     """Count tokens in a string"""
     try:
         encoding = tiktoken.encoding_for_model(model)
