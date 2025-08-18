@@ -22,17 +22,6 @@ from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain.tools import tool
 from openai import OpenAIError, APITimeoutError
 
-# Import database utilities
-
-from .chat_utils import (
-    
-    count_tokens,
-    count_tokens_from_string
-
-)
-
-
-
 # Global variables for chat system and messages
 chat_system = ""
 messages = []
@@ -40,6 +29,8 @@ messages = []
 # Load ENV file
 load_dotenv()
 OPENAIKEY = os.getenv('OPEN_AI_KEY')
+
+MODEL = "gpt-3.5-turbo"
 
 
 
@@ -274,7 +265,7 @@ def get_token_usage_view(request, run_id):
         'session': run_id,
         'run_id': token_usage['run_id'],
         'input_tokens': token_usage['input_tokens'],
-        'output_tokens': token_usage['output_token_count'],
+        'output_tokens': token_usage['output_tokens'],
         'total_tokens': token_usage['total_tokens']
     })
 
@@ -294,8 +285,6 @@ def chatbot_input(request):
     if not usermessage:
         return JsonResponse({'success': False, 'error': 'No message provided'})
 
-    # Track token usage for streaming response
-    output_token_count = 0
     try:
         # SEO + arithmetic tools
         tools = [multiply, validate_and_fetch_url]
@@ -303,7 +292,7 @@ def chatbot_input(request):
         llm = ChatOpenAI(
             temperature=0.7,
             openai_api_key=OPENAIKEY,
-            model="gpt-3.5-turbo"
+            model=MODEL
         )
         llm_with_tools = llm.bind_tools(tools)
         chat_system = "LLM Call"
@@ -318,9 +307,6 @@ def chatbot_input(request):
         
         # Add the new user message
         messages.append(HumanMessage(content=usermessage))
-
-        # Count input tokens
-        input_tokens = count_tokens(usermessage)
 
         # Get initial AI response
         ai_msg = llm_with_tools.invoke(messages)
@@ -364,29 +350,29 @@ def chatbot_input(request):
             chat_history[session_id].extend(messages[len(chat_history[session_id]):])
             
             def stream_response():
-                nonlocal output_token_count
                 try:
                     final_response_content = ""
+                    usage_metadata = None
                     for chunk in llm_with_tools.stream(messages):
                         if isinstance(chunk, AIMessageChunk) and chunk.content:
                             final_response_content += chunk.content
                             run_id = chunk.id
-                            # Count tokens in this chunk
-                            chunk_tokens = count_tokens_from_string(chunk.content)
-                            output_token_count += chunk_tokens
                             yield chunk.content
                     
                     # Store the final AI response in chat history
                     if final_response_content:
+                        # Fallback for OpenAI (no usage in streaming)
+                        if usage_metadata is None:
+                            resp = llm_with_tools.invoke(messages, config={"include_usage_metadata": True})
+                            usage_metadata = resp.usage_metadata
                         chat_history[session_id].append(AIMessage(content=final_response_content))
                         # Save token usage
-                        total_tokens = input_tokens + output_token_count
                         response_type='Tool Usage' if ai_msg.tool_calls else 'General Conversation'
                         tools_used=len(ai_msg.tool_calls) > 0 if ai_msg.tool_calls else False
                         source=chat_system
-                        tokenresponse[session_id]['total_tokens'] = total_tokens
-                        tokenresponse[session_id]['input_tokens'] = input_tokens
-                        tokenresponse[session_id]['output_token_count'] = output_token_count
+                        tokenresponse[session_id]['total_tokens'] = usage_metadata['total_tokens']
+                        tokenresponse[session_id]['input_tokens'] = usage_metadata['input_tokens']
+                        tokenresponse[session_id]['output_tokens'] = usage_metadata['output_tokens']
                         tokenresponse[session_id]['response_type'] = response_type
                         tokenresponse[session_id]['tools_used'] = tools_used
                         tokenresponse[session_id]['source'] = source
@@ -402,37 +388,36 @@ def chatbot_input(request):
             chat_history[session_id].append(HumanMessage(content=usermessage))
             
             def stream_response():
-                nonlocal output_token_count
                 try:
 
                     final_response_content = ""
+                    usage_metadata = None
                     for chunk in llm_with_tools.stream(messages):
                         if isinstance(chunk, AIMessageChunk) and chunk.content:
                             final_response_content += chunk.content
-                            # Count tokens in this chunk
-                            chunk_tokens = count_tokens_from_string(chunk.content)
-                            output_token_count += chunk_tokens
                             run_id = chunk.id
                             yield chunk.content
 
+                        # Capture usage metadata (Anthropic supports this in stream)
+                        if hasattr(chunk, "usage_metadata") and chunk.usage_metadata:
+                            usage_metadata = chunk.usage_metadata
                     
                     # Store the final AI response in chat history
                     if final_response_content:
-                        chat_history[session_id].append(AIMessage(content=final_response_content))
-                        
-                        # Save token usage
-                        
-                        total_tokens = input_tokens + output_token_count
-                        
-                        response_type='Tool Usage' if ai_msg.tool_calls else 'General Conversation'
-                        
-                        tools_used=len(ai_msg.tool_calls) > 0 if ai_msg.tool_calls else False
-                        
-                        source=chat_system
 
-                        tokenresponse[session_id]['total_tokens'] = total_tokens
-                        tokenresponse[session_id]['input_tokens'] = input_tokens
-                        tokenresponse[session_id]['output_token_count'] = output_token_count
+                        # Fallback for OpenAI (no usage in streaming)
+                        if usage_metadata is None:
+                            resp = llm_with_tools.invoke(messages, config={"include_usage_metadata": True})
+                            usage_metadata = resp.usage_metadata
+
+                        chat_history[session_id].append(AIMessage(content=final_response_content))
+                        # Save token usage
+                        response_type='Tool Usage' if ai_msg.tool_calls else 'General Conversation'                        
+                        tools_used=len(ai_msg.tool_calls) > 0 if ai_msg.tool_calls else False
+                        source=chat_system
+                        tokenresponse[session_id]['total_tokens'] = usage_metadata['total_tokens']
+                        tokenresponse[session_id]['input_tokens'] = usage_metadata['input_tokens']
+                        tokenresponse[session_id]['output_tokens'] = usage_metadata['output_tokens']
                         tokenresponse[session_id]['response_type'] = response_type
                         tokenresponse[session_id]['tools_used'] = tools_used
                         tokenresponse[session_id]['source'] = source
