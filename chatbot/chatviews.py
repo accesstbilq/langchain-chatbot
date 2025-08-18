@@ -23,17 +23,14 @@ from langchain.tools import tool
 from openai import OpenAIError, APITimeoutError
 
 # Import database utilities
+
 from .chat_utils import (
-    get_or_create_chat_session, 
-    save_message_to_db, 
-    load_chat_history_from_db,
-    generate_run_id,
-    generate_message_id,
+    
     count_tokens,
-    count_tokens_from_string,
-    save_token_usage,
-    get_token_usage
+    count_tokens_from_string
+
 )
+
 
 
 # Global variables for chat system and messages
@@ -44,7 +41,7 @@ messages = []
 load_dotenv()
 OPENAIKEY = os.getenv('OPEN_AI_KEY')
 
-MODEL = "gpt-3.5-turbo"
+
 
 # Document storage configuration
 UPLOAD_DIR = os.path.join(settings.MEDIA_ROOT, 'documents')
@@ -124,6 +121,7 @@ def document_view(request):
 def dashboard_view(request):
     return render(request, 'dashboard.html')
 
+
 @csrf_exempt
 def upload_documents(request):
     """Handle multiple document uploads"""
@@ -180,13 +178,9 @@ def upload_documents(request):
                 'url': fs.url(filename) if hasattr(fs, 'url') else None
             }
             
+            
             uploaded_documents[unique_id] = doc_info
-
-
-
-
-
-
+            
             uploaded_files.append({
                 'id': unique_id,
                 'name': file.name,
@@ -265,38 +259,37 @@ def delete_document(request):
             'success': False,
             'error': f"Error deleting document: {str(e)}"
         })
-    
 
 # Add this at the top with other global variables
 chat_history = {}  # Store chat history by session
+tokenresponse = {}  # Store chat history by session
+
 
 def get_token_usage_view(request, run_id):
-    token_usage = get_token_usage(run_id=run_id)
+    token_usage = tokenresponse[run_id]
     return JsonResponse({
-        'response_type': token_usage.response_type,
-        'tools_used': token_usage.tools_used,
-        'source': token_usage.source,
-        'message_id': token_usage.message_id,
-        'run_id': token_usage.run_id,
-        'session': token_usage.session.session_id,
-        'input_tokens': token_usage.input_tokens,
-        'output_tokens': token_usage.output_tokens,
-        'total_tokens': token_usage.total_tokens
+        'response_type': token_usage['response_type'],
+        'tools_used': token_usage['tools_used'],
+        'source': token_usage['source'],
+        'session': run_id,
+        'run_id': token_usage['run_id'],
+        'input_tokens': token_usage['input_tokens'],
+        'output_tokens': token_usage['output_token_count'],
+        'total_tokens': token_usage['total_tokens']
     })
+
 
 @csrf_exempt
 def chatbot_input(request):
-    """SEO-focused chatbot with database-backed chat history"""
-    global chat_system
+    """SEO-focused chatbot with arithmetic tool support and chat history"""
+    global chat_system, chat_history,tokenresponse
 
     if not hasattr(request, 'POST') or request.method != 'POST':
         return JsonResponse({'success': False, 'error': 'Only POST requests are allowed'})
     
     data = json.loads(request.body.decode('utf-8'))
     usermessage = data.get("message", "")
-    session_id = data.get("session_id", "default")
-    run_id = data.get("run_id", None)  # Optional run_id from frontend
-    user = request.user if request.user.is_authenticated else None
+    session_id = data.get("session_id", "default")  # Get session ID from frontend
     
     if not usermessage:
         return JsonResponse({'success': False, 'error': 'No message provided'})
@@ -310,67 +303,32 @@ def chatbot_input(request):
         llm = ChatOpenAI(
             temperature=0.7,
             openai_api_key=OPENAIKEY,
-            model=MODEL
+            model="gpt-3.5-turbo"
         )
         llm_with_tools = llm.bind_tools(tools)
         chat_system = "LLM Call"
         
-        # Get or create chat session in database
-        session, created = get_or_create_chat_session(session_id, user, run_id)
+        # Initialize or get existing chat history for this session
+        if session_id not in chat_history:
+            chat_history[session_id] = [SystemMessage(content=system_message)]
+            tokenresponse[session_id] = {}
         
-        # Generate new run_id if not provided
-        current_run_id = run_id or session.run_id or generate_run_id()
-        
-        # Load existing chat history from database
-        messages = load_chat_history_from_db(session_id)
-        
-        # If no messages exist or this is a new session, start with system message
-        if not messages or created:
-            system_msg = SystemMessage(content=system_message)
-            save_message_to_db(
-                session, 
-                'system', 
-                system_message, 
-                run_id=current_run_id,
-                message_id=generate_message_id()
-            )
-            messages = [system_msg]
+        # Get current conversation messages
+        messages = chat_history[session_id].copy()
         
         # Add the new user message
-        user_msg = HumanMessage(content=usermessage)
-        messages.append(user_msg)
+        messages.append(HumanMessage(content=usermessage))
 
         # Count input tokens
-        input_tokens = count_tokens(messages)
-
-        save_message_to_db(
-            session, 
-            'human', 
-            usermessage, 
-            run_id=current_run_id,
-            message_id=generate_message_id()
-        )
+        input_tokens = count_tokens(usermessage)
 
         # Get initial AI response
         ai_msg = llm_with_tools.invoke(messages)
         
-        
-
         # Process tool calls if any
         if ai_msg.tool_calls:
             messages.append(ai_msg)
-            
-            # Save AI message with tool calls to database
-            save_message_to_db(
-                session, 
-                'ai', 
-                ai_msg.content, 
-                tool_calls=ai_msg.tool_calls,
-                run_id=current_run_id,
-                message_id=generate_message_id()
-            )
-            
-            # Process tool calls...
+           
             tool_mapping = {
                 "multiply": multiply,
                 "validate_and_fetch_url": validate_and_fetch_url
@@ -381,67 +339,29 @@ def chatbot_input(request):
                 tool_args = tool_call["args"]
                 tool_call_id = tool_call["id"]
                 
-                print(f"Processing tool call: {tool_name} with args: {tool_args}")
                 
                 if tool_name in tool_mapping:
                     selected_tool = tool_mapping[tool_name]
                     try:
                         # Run the tool with args
                         tool_result = selected_tool.invoke(tool_args)
-                        print(f"Tool result: {tool_result}")
                         
                         # Append ToolMessage with matching tool_call_id
-                        tool_message = ToolMessage(
-                            content=str(tool_result), 
-                            tool_call_id=tool_call_id
+                        messages.append(
+                            ToolMessage(content=str(tool_result), tool_call_id=tool_call_id)
                         )
-                        messages.append(tool_message)
-                        
-                        # Save tool message to database
-                        save_message_to_db(
-                            session, 
-                            'tool', 
-                            str(tool_result), 
-                            tool_call_id=tool_call_id,
-                            run_id=current_run_id,
-                            message_id=generate_message_id()
-                        )
-                        
                     except Exception as e:
-                        print(f"Error running tool {tool_name}: {str(e)}")
-                        error_content = f"⚠ Error running tool {tool_name}: {str(e)}"
-                        error_message = ToolMessage(
-                            content=error_content, 
-                            tool_call_id=tool_call_id
-                        )
-                        messages.append(error_message)
-                        
-                        # Save error message to database
-                        save_message_to_db(
-                            session, 
-                            'tool', 
-                            error_content, 
-                            tool_call_id=tool_call_id,
-                            run_id=current_run_id,
-                            message_id=generate_message_id()
+                        messages.append(
+                            ToolMessage(content=f"⚠ Error running tool {tool_name}: {str(e)}", tool_call_id=tool_call_id)
                         )
                 else:
-                    error_content = f"Unknown tool: {tool_name}"
-                    error_message = ToolMessage(
-                        content=error_content, 
-                        tool_call_id=tool_call_id
+                    messages.append(
+                        ToolMessage(content=f"Unknown tool: {tool_name}", tool_call_id=tool_call_id)
                     )
-                    messages.append(error_message)
-                    
-                    # Save error message to database
-                    save_message_to_db(
-                        session, 
-                        'tool', 
-                        error_content, 
-                        tool_call_id=tool_call_id,
-                        run_id=current_run_id,
-                        message_id=generate_message_id()
-                    )
+            
+            # Store the conversation history (user message + AI response + tool messages)
+            chat_history[session_id].append(HumanMessage(content=usermessage))
+            chat_history[session_id].extend(messages[len(chat_history[session_id]):])
             
             def stream_response():
                 nonlocal output_token_count
@@ -450,46 +370,41 @@ def chatbot_input(request):
                     for chunk in llm_with_tools.stream(messages):
                         if isinstance(chunk, AIMessageChunk) and chunk.content:
                             final_response_content += chunk.content
+                            run_id = chunk.id
                             # Count tokens in this chunk
                             chunk_tokens = count_tokens_from_string(chunk.content)
                             output_token_count += chunk_tokens
                             yield chunk.content
                     
-                    # Save the final AI response to database
+                    # Store the final AI response in chat history
                     if final_response_content:
-                        savemessage = save_message_to_db(
-                            session, 
-                            'ai', 
-                            final_response_content,
-                            run_id=current_run_id,
-                            message_id=generate_message_id()
-                        )
+                        chat_history[session_id].append(AIMessage(content=final_response_content))
                         # Save token usage
                         total_tokens = input_tokens + output_token_count
                         response_type='Tool Usage' if ai_msg.tool_calls else 'General Conversation'
                         tools_used=len(ai_msg.tool_calls) > 0 if ai_msg.tool_calls else False
                         source=chat_system
-                        save_token_usage(session, current_run_id, input_tokens, output_token_count, total_tokens,response_type,tools_used,source,savemessage)
+                        tokenresponse[session_id]['total_tokens'] = total_tokens
+                        tokenresponse[session_id]['input_tokens'] = input_tokens
+                        tokenresponse[session_id]['output_token_count'] = output_token_count
+                        tokenresponse[session_id]['response_type'] = response_type
+                        tokenresponse[session_id]['tools_used'] = tools_used
+                        tokenresponse[session_id]['source'] = source
+                        tokenresponse[session_id]['run_id'] = run_id
+                        
                 except (OpenAIError, APITimeoutError) as e:
-                    error_msg = f"\n[Error occurred: {str(e)}]"
-                    save_message_to_db(
-                        session, 
-                        'ai', 
-                        error_msg,
-                        run_id=current_run_id,
-                        message_id=generate_message_id()
-                    )
-                    yield error_msg
+                    yield f"\n[Error occurred: {str(e)}]"
 
-            streaming_response =  StreamingHttpResponse(stream_response(), content_type='text/plain')
-            streaming_response['X-Run-ID'] = current_run_id  # Add as header
-            return streaming_response
+            return StreamingHttpResponse(stream_response(), content_type='text/plain')
 
         else:
-            # No tools called, stream response directly
+            # No tools called, store conversation and stream response
+            chat_history[session_id].append(HumanMessage(content=usermessage))
+            
             def stream_response():
+                nonlocal output_token_count
                 try:
-                    nonlocal output_token_count
+
                     final_response_content = ""
                     for chunk in llm_with_tools.stream(messages):
                         if isinstance(chunk, AIMessageChunk) and chunk.content:
@@ -497,39 +412,36 @@ def chatbot_input(request):
                             # Count tokens in this chunk
                             chunk_tokens = count_tokens_from_string(chunk.content)
                             output_token_count += chunk_tokens
+                            run_id = chunk.id
                             yield chunk.content
+
                     
-                    # Save the final AI response to database
+                    # Store the final AI response in chat history
                     if final_response_content:
-                        savemessage = save_message_to_db(
-                            session, 
-                            'ai', 
-                            final_response_content,
-                            run_id=current_run_id,
-                            message_id=generate_message_id()
-                        )
+                        chat_history[session_id].append(AIMessage(content=final_response_content))
+                        
                         # Save token usage
+                        
                         total_tokens = input_tokens + output_token_count
-
+                        
                         response_type='Tool Usage' if ai_msg.tool_calls else 'General Conversation'
+                        
                         tools_used=len(ai_msg.tool_calls) > 0 if ai_msg.tool_calls else False
+                        
                         source=chat_system
-                        save_token_usage(session, current_run_id, input_tokens, output_token_count, total_tokens,response_type,tools_used,source,savemessage)
 
+                        tokenresponse[session_id]['total_tokens'] = total_tokens
+                        tokenresponse[session_id]['input_tokens'] = input_tokens
+                        tokenresponse[session_id]['output_token_count'] = output_token_count
+                        tokenresponse[session_id]['response_type'] = response_type
+                        tokenresponse[session_id]['tools_used'] = tools_used
+                        tokenresponse[session_id]['source'] = source
+                        tokenresponse[session_id]['run_id'] = run_id
+                        
                 except (OpenAIError, APITimeoutError) as e:
-                    error_msg = f"\n[Error occurred: {str(e)}]"
-                    save_message_to_db(
-                        session, 
-                        'ai', 
-                        error_msg,
-                        run_id=current_run_id,
-                        message_id=generate_message_id()
-                    )
-                    yield error_msg
+                    yield f"\n[Error occurred: {str(e)}]"
 
-            streaming_response =  StreamingHttpResponse(stream_response(), content_type='text/plain')
-            streaming_response['X-Run-ID'] = current_run_id  # Add as header
-            return streaming_response
+            return StreamingHttpResponse(stream_response(), content_type='text/plain')
 
     except Exception as e:
         traceback.print_exc()

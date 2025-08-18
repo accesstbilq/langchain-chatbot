@@ -59,24 +59,19 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ message: userInput,session_id: sessionId })
                 }).then(response => {
-                    const runId = response.headers.get('x-run-id');
-                    console.log('x-run-id:', runId);
+                    // const runId = response.headers.get('x-run-id');
+                    // console.log('x-run-id:', runId);
                     
-                    // You can store it in a variable or use it as needed
-                    // For example, store it globally or in a data attribute
-                    window.currentRunId = runId;
-
-
-
-
+                    // // You can store it in a variable or use it as needed
+                    // // For example, store it globally or in a data attribute
+                    // window.currentRunId = runId;
                     const reader = response.body.getReader();
-
                     function read() {
                         reader.read().then(({ done, value }) => {
                             if (done) {
-                                // ✅ When done streaming, get token usage
-                                if (window.currentRunId) {
-                                    $.get(`/get-token-usage/${window.currentRunId}/`, function(data) {
+                                //✅ When done streaming, get token usage
+                                if (sessionId) {
+                                    $.get(`/get-token-usage/${sessionId}/`, function(data) {
                                         console.log("Token usage:", data);
                                         // You can display this in your UI
                                         let metadataHtml = `
@@ -87,7 +82,6 @@
                                                 <p>Output Tokens: ${data.output_tokens}</p>
                                                 <p>Session Id: ${data.session}</p>
                                                 <p>Run Id: ${data.run_id}</p>
-                                                <p>Message Id: ${data.message_id}</p>
                                             `;
                                             $('.metadata').html(metadataHtml);
                                     }).fail(err => {
