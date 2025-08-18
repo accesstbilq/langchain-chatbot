@@ -36,6 +36,11 @@
 
         <script>
 
+            function scrollToBottom() {
+                const scrollableDiv = document.getElementById('chat-box');
+                scrollableDiv.scrollTop = scrollableDiv.scrollHeight;
+            }
+
             const sessionId = 'session_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
             // Original sendMessage function (preserved and enhanced)
             function sendMessage() {
@@ -59,6 +64,8 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ message: userInput,session_id: sessionId })
                 }).then(response => {
+                    scrollToBottom();
+
                     // const runId = response.headers.get('x-run-id');
                     // console.log('x-run-id:', runId);
                     

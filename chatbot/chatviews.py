@@ -18,6 +18,7 @@ from bs4 import BeautifulSoup
 from langchain_openai import ChatOpenAI
 from langchain.schema import SystemMessage, AIMessage, BaseMessage
 from langchain_core.messages import ToolMessage,HumanMessage,AIMessageChunk
+from langchain_community.callbacks import get_openai_callback
 from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain.tools import tool
 from openai import OpenAIError, APITimeoutError
@@ -349,84 +350,18 @@ def chatbot_input(request):
             chat_history[session_id].append(HumanMessage(content=usermessage))
             chat_history[session_id].extend(messages[len(chat_history[session_id]):])
             
-            def stream_response():
-                try:
-                    final_response_content = ""
-                    usage_metadata = None
-                    for chunk in llm_with_tools.stream(messages):
-                        if isinstance(chunk, AIMessageChunk) and chunk.content:
-                            final_response_content += chunk.content
-                            run_id = chunk.id
-                            yield chunk.content
-                    
-                    # Store the final AI response in chat history
-                    if final_response_content:
-                        # Fallback for OpenAI (no usage in streaming)
-                        if usage_metadata is None:
-                            resp = llm_with_tools.invoke(messages, config={"include_usage_metadata": True})
-                            usage_metadata = resp.usage_metadata
-                        chat_history[session_id].append(AIMessage(content=final_response_content))
-                        # Save token usage
-                        response_type='Tool Usage' if ai_msg.tool_calls else 'General Conversation'
-                        tools_used=len(ai_msg.tool_calls) > 0 if ai_msg.tool_calls else False
-                        source=chat_system
-                        tokenresponse[session_id]['total_tokens'] = usage_metadata['total_tokens']
-                        tokenresponse[session_id]['input_tokens'] = usage_metadata['input_tokens']
-                        tokenresponse[session_id]['output_tokens'] = usage_metadata['output_tokens']
-                        tokenresponse[session_id]['response_type'] = response_type
-                        tokenresponse[session_id]['tools_used'] = tools_used
-                        tokenresponse[session_id]['source'] = source
-                        tokenresponse[session_id]['run_id'] = run_id
-                        
-                except (OpenAIError, APITimeoutError) as e:
-                    yield f"\n[Error occurred: {str(e)}]"
-
-            return StreamingHttpResponse(stream_response(), content_type='text/plain')
+            return StreamingHttpResponse(
+                build_stream_response(llm_with_tools, messages, ai_msg, session_id, chat_system),
+                content_type='text/plain'
+            )
 
         else:
             # No tools called, store conversation and stream response
             chat_history[session_id].append(HumanMessage(content=usermessage))
-            
-            def stream_response():
-                try:
-
-                    final_response_content = ""
-                    usage_metadata = None
-                    for chunk in llm_with_tools.stream(messages):
-                        if isinstance(chunk, AIMessageChunk) and chunk.content:
-                            final_response_content += chunk.content
-                            run_id = chunk.id
-                            yield chunk.content
-
-                        # Capture usage metadata (Anthropic supports this in stream)
-                        if hasattr(chunk, "usage_metadata") and chunk.usage_metadata:
-                            usage_metadata = chunk.usage_metadata
-                    
-                    # Store the final AI response in chat history
-                    if final_response_content:
-
-                        # Fallback for OpenAI (no usage in streaming)
-                        if usage_metadata is None:
-                            resp = llm_with_tools.invoke(messages, config={"include_usage_metadata": True})
-                            usage_metadata = resp.usage_metadata
-
-                        chat_history[session_id].append(AIMessage(content=final_response_content))
-                        # Save token usage
-                        response_type='Tool Usage' if ai_msg.tool_calls else 'General Conversation'                        
-                        tools_used=len(ai_msg.tool_calls) > 0 if ai_msg.tool_calls else False
-                        source=chat_system
-                        tokenresponse[session_id]['total_tokens'] = usage_metadata['total_tokens']
-                        tokenresponse[session_id]['input_tokens'] = usage_metadata['input_tokens']
-                        tokenresponse[session_id]['output_tokens'] = usage_metadata['output_tokens']
-                        tokenresponse[session_id]['response_type'] = response_type
-                        tokenresponse[session_id]['tools_used'] = tools_used
-                        tokenresponse[session_id]['source'] = source
-                        tokenresponse[session_id]['run_id'] = run_id
-                        
-                except (OpenAIError, APITimeoutError) as e:
-                    yield f"\n[Error occurred: {str(e)}]"
-
-            return StreamingHttpResponse(stream_response(), content_type='text/plain')
+            return StreamingHttpResponse(
+                build_stream_response(llm_with_tools, messages, ai_msg, session_id, chat_system),
+                content_type='text/plain'
+            )
 
     except Exception as e:
         traceback.print_exc()
@@ -434,3 +369,45 @@ def chatbot_input(request):
             'success': False,
             'error': f'Processing error: {str(e)}'
         })
+    
+def build_stream_response(llm_with_tools, messages, ai_msg, session_id, chat_system):
+    """Unified streaming response generator with token usage tracking"""
+    try:
+        final_response_content = ""
+        usage_metadata = None
+        run_id = None
+
+        for chunk in llm_with_tools.stream(messages):
+            if isinstance(chunk, AIMessageChunk) and chunk.content:
+                final_response_content += chunk.content
+                run_id = chunk.id
+                yield chunk.content
+
+            # Capture usage metadata (Anthropic supports this in stream)
+            if hasattr(chunk, "usage_metadata") and chunk.usage_metadata:
+                usage_metadata = chunk.usage_metadata
+
+        # Store the final AI response in chat history
+        if final_response_content:
+            if usage_metadata is None:  # Fallback for OpenAI
+                resp = llm_with_tools.invoke(messages, config={"include_usage_metadata": True})
+                usage_metadata = resp.usage_metadata
+
+            chat_history[session_id].append(AIMessage(content=final_response_content))
+
+            # Save token usage
+            response_type = 'Tool Usage' if ai_msg.tool_calls else 'General Conversation'
+            tools_used = len(ai_msg.tool_calls) > 0 if ai_msg.tool_calls else False
+
+            tokenresponse[session_id].update({
+                'total_tokens': usage_metadata['total_tokens'],
+                'input_tokens': usage_metadata['input_tokens'],
+                'output_tokens': usage_metadata['output_tokens'],
+                'response_type': response_type,
+                'tools_used': tools_used,
+                'source': chat_system,
+                'run_id': run_id
+            })
+
+    except (OpenAIError, APITimeoutError) as e:
+        yield f"\n[Error occurred: {str(e)}]"
