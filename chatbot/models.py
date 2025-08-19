@@ -55,5 +55,5 @@ class ChatMessage(models.Model):
             models.Index(fields=['session', 'run_id']),
         ]
     
-    def __str__(self):
-        return f"{self.message_type}: {self.content[:50]}..."
+    #def __str__(self):
+     #   return f"{self.message_type}: {self.content[:50]}..."
