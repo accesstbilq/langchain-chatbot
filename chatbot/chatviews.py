@@ -12,6 +12,7 @@ from datetime import datetime
 import mimetypes
 import uuid
 from django.http import StreamingHttpResponse
+from .models import ChatSession, ChatMessage
 
 from bs4 import BeautifulSoup
 
@@ -255,8 +256,8 @@ def delete_document(request):
 # Add this at the top with other global variables
 chat_history = {}  # Store chat history by session
 tokenresponse = {}  # Store chat history by session
-
-
+messagedata = {}  # Store chat history by session
+count = 0
 def get_token_usage_view(request, run_id):
     token_usage = tokenresponse[run_id]
     return JsonResponse({
@@ -274,7 +275,7 @@ def get_token_usage_view(request, run_id):
 @csrf_exempt
 def chatbot_input(request):
     """SEO-focused chatbot with arithmetic tool support and chat history"""
-    global chat_system, chat_history,tokenresponse
+    global chat_system, chat_history,tokenresponse,count
 
     if not hasattr(request, 'POST') or request.method != 'POST':
         return JsonResponse({'success': False, 'error': 'Only POST requests are allowed'})
@@ -282,7 +283,9 @@ def chatbot_input(request):
     data = json.loads(request.body.decode('utf-8'))
     usermessage = data.get("message", "")
     session_id = data.get("session_id", "default")  # Get session ID from frontend
-    
+
+    runid = generate_run_id()
+
     if not usermessage:
         return JsonResponse({'success': False, 'error': 'No message provided'})
 
@@ -300,14 +303,49 @@ def chatbot_input(request):
         
         # Initialize or get existing chat history for this session
         if session_id not in chat_history:
+            count = 0
             chat_history[session_id] = [SystemMessage(content=system_message)]
             tokenresponse[session_id] = {}
-        
+            messagedata[session_id] = []
+            messagedata[session_id].append({
+                "message_type": "system",
+                "content": system_message,
+                "message_id": generate_message_id(),
+                "tool_calls": '',
+                "tool_call_id": '',
+                "count": count,
+                "response_type": '',
+                "tools_used": '',
+                "source": '',
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0
+            })
+        else:
+            count = count + 1
+
         # Get current conversation messages
         messages = chat_history[session_id].copy()
         
         # Add the new user message
         messages.append(HumanMessage(content=usermessage))
+
+
+        messagedata[session_id].append({
+            "message_type": "human",
+            "content": usermessage,
+            "message_id": generate_message_id(),
+            "tool_calls": '',
+            "tool_call_id": '',
+            "count": count,
+            "response_type": '',
+            "tools_used": '',
+            "source": '',
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0
+        })
+
 
         # Get initial AI response
         ai_msg = llm_with_tools.invoke(messages)
@@ -315,7 +353,23 @@ def chatbot_input(request):
         # Process tool calls if any
         if ai_msg.tool_calls:
             messages.append(ai_msg)
-           
+
+            messagedata[session_id].append({
+                "message_type": "ai",
+                "content": ai_msg.content,
+                "message_id": generate_message_id(),
+                "tool_calls": ai_msg.tool_calls,
+                "tool_call_id": '',
+                "count": count,
+                "response_type": '',
+                "tools_used": '',
+                "source": '',
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0
+            })
+
+            
             tool_mapping = {
                 "multiply": multiply,
                 "validate_and_fetch_url": validate_and_fetch_url
@@ -337,29 +391,80 @@ def chatbot_input(request):
                         messages.append(
                             ToolMessage(content=str(tool_result), tool_call_id=tool_call_id)
                         )
+
+                        messagedata[session_id].append({
+                            "message_type": "tool",
+                            "content": str(tool_result),
+                            "message_id": generate_message_id(),
+                            "tool_calls": ai_msg.tool_calls,
+                            "tool_call_id": tool_call_id,
+                            "count": count,
+                            "response_type": '',
+                            "tools_used": '',
+                            "source": '',
+                            "input_tokens": 0,
+                            "output_tokens": 0,
+                            "total_tokens": 0
+                        })
+
+                        
                     except Exception as e:
                         messages.append(
                             ToolMessage(content=f"⚠ Error running tool {tool_name}: {str(e)}", tool_call_id=tool_call_id)
                         )
+
+                        messagedata[session_id].append({
+                            "message_type": "tool",
+                            "content": f"⚠ Error running tool {tool_name}: {str(e)}",
+                            "message_id": generate_message_id(),
+                            "tool_calls": "",
+                            "tool_call_id": tool_call_id,
+                            "count": count,
+                            "response_type": '',
+                            "tools_used": '',
+                            "source": '',
+                            "input_tokens": 0,
+                            "output_tokens": 0,
+                            "total_tokens": 0
+                        })
+
+
+                        
                 else:
                     messages.append(
                         ToolMessage(content=f"Unknown tool: {tool_name}", tool_call_id=tool_call_id)
                     )
+                    messagedata[session_id].append({
+                        "message_type": "tool",
+                        "content": f"Unknown tool: {tool_name}",
+                        "message_id": generate_message_id(),
+                        "tool_calls": "",
+                        "tool_call_id": tool_call_id,
+                        "count": count,
+                        "response_type": '',
+                        "tools_used": '',
+                        "source": '',
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "total_tokens": 0
+                    })
+                    
             
             # Store the conversation history (user message + AI response + tool messages)
             chat_history[session_id].append(HumanMessage(content=usermessage))
             chat_history[session_id].extend(messages[len(chat_history[session_id]):])
             
             return StreamingHttpResponse(
-                build_stream_response(llm_with_tools, messages, ai_msg, session_id, chat_system),
+                build_stream_response(llm_with_tools, messages, ai_msg, session_id, chat_system,count),
                 content_type='text/plain'
             )
 
         else:
             # No tools called, store conversation and stream response
             chat_history[session_id].append(HumanMessage(content=usermessage))
+            
             return StreamingHttpResponse(
-                build_stream_response(llm_with_tools, messages, ai_msg, session_id, chat_system),
+                build_stream_response(llm_with_tools, messages, ai_msg, session_id, chat_system,count),
                 content_type='text/plain'
             )
 
@@ -370,7 +475,7 @@ def chatbot_input(request):
             'error': f'Processing error: {str(e)}'
         })
     
-def build_stream_response(llm_with_tools, messages, ai_msg, session_id, chat_system):
+def build_stream_response(llm_with_tools, messages, ai_msg, session_id, chat_system,count):
     """Unified streaming response generator with token usage tracking"""
     try:
         final_response_content = ""
@@ -398,7 +503,7 @@ def build_stream_response(llm_with_tools, messages, ai_msg, session_id, chat_sys
             # Save token usage
             response_type = 'Tool Usage' if ai_msg.tool_calls else 'General Conversation'
             tools_used = len(ai_msg.tool_calls) > 0 if ai_msg.tool_calls else False
-
+            
             tokenresponse[session_id].update({
                 'total_tokens': usage_metadata['total_tokens'],
                 'input_tokens': usage_metadata['input_tokens'],
@@ -408,6 +513,147 @@ def build_stream_response(llm_with_tools, messages, ai_msg, session_id, chat_sys
                 'source': chat_system,
                 'run_id': run_id
             })
+            session, create = get_or_create_chat_session(session_id,run_id)
+
+            messagedata[session_id].append({
+                "message_type": "ai",
+                "content": final_response_content,
+                "message_id": generate_message_id(),
+                "tool_calls": '',
+                "tool_call_id": '',
+                "count": count,
+                "response_type": response_type,
+                "tools_used": tools_used,
+                "source": chat_system,
+                "input_tokens": usage_metadata['input_tokens'],
+                "output_tokens": usage_metadata['output_tokens'],
+                "total_tokens": usage_metadata['total_tokens']
+            })
+
+            save_message_to_db(session,messagedata,run_id,count)
+
+            
+
+            
 
     except (OpenAIError, APITimeoutError) as e:
         yield f"\n[Error occurred: {str(e)}]"
+
+def get_or_create_chat_session(session_id, run_id=None):
+    """Get existing chat session or create new one"""
+    try:
+        session, created = ChatSession.objects.get_or_create(
+            session_id=session_id,
+            defaults={
+                'run_id': run_id,
+                'is_active': True
+            }
+        )
+        
+        # Update run_id if provided and different
+        if run_id and session.run_id != run_id:
+            session.run_id = run_id
+            session.save(update_fields=['run_id', 'updated_at'])
+            
+        return session, created
+    except Exception as e:
+        print(f"Error creating/getting chat session: {str(e)}")
+        raise
+
+def save_message_to_db(session, messagedata, run_id=None, count=0):
+    """Save a single message to database"""
+    try:
+        
+        # Get the next order number for this session
+        last_message = ChatMessage.objects.filter(session=session).order_by('-order').first()
+        next_order = (last_message.order + 1) if last_message else 1
+        
+        # Generate IDs if not provided
+        if not run_id:
+            run_id = session.run_id or generate_run_id()
+        
+
+        savemessagedata = messagedata[session.session_id] 
+
+        for msg in savemessagedata:
+            messagecount = msg["count"]
+            if messagecount == count:
+                message_type = msg["message_type"]
+                content = msg["content"]
+                message_id = msg["message_id"]
+                tool_calls = msg["tool_calls"]
+                tool_call_id = msg["tool_call_id"]
+                response_type = msg["response_type"]
+                tools_used = msg["tools_used"]
+                source = msg["source"]
+                input_tokens   = msg["input_tokens"]
+                output_tokens   = msg["output_tokens"]
+                total_tokens   = msg["total_tokens"]
+                # Create the message
+                ChatMessage.objects.create(
+                    session=session,
+                    message_id=message_id,
+                    run_id=run_id,
+                    message_type=message_type,
+                    content=content,
+                    tool_call_id=tool_call_id or '',
+                    tool_calls=tool_calls or {},
+                    tools_used= tools_used,
+                    response_type= response_type,
+                    source= source,
+                    input_tokens= input_tokens,
+                    output_tokens= output_tokens,
+                    total_tokens= total_tokens,
+                    order=next_order
+                )
+        
+        # # Update session's updated_at timestamp and run_id
+        session.run_id = run_id
+        session.save(update_fields=['updated_at', 'run_id'])
+        
+        return count
+    except Exception as e:
+        print(f"Error saving message to DB: {str(e)}")
+        raise
+
+def generate_message_id():
+    """Generate a unique message ID"""
+    return f"msg--{uuid.uuid4().hex[:8]}-{uuid.uuid4().hex[:4]}-{uuid.uuid4().hex[:4]}-{uuid.uuid4().hex[:4]}-{uuid.uuid4().hex[:12]}"
+
+def generate_run_id():
+    """Generate a unique run ID for conversation tracking"""
+    return f"run--{uuid.uuid4().hex[:8]}-{uuid.uuid4().hex[:4]}-{uuid.uuid4().hex[:4]}-{uuid.uuid4().hex[:4]}-{uuid.uuid4().hex[:12]}"
+
+def load_chat_history_from_db(session_id):
+    """Load chat history from database and convert to LangChain message format"""
+    try:
+        session = ChatSession.objects.get(session_id=session_id)
+        messages = ChatMessage.objects.filter(session=session).order_by('order')
+        
+        langchain_messages = []
+        
+        for msg in messages:
+            if msg.message_type == 'system':
+                langchain_messages.append(SystemMessage(content=msg.content))
+            elif msg.message_type == 'human':
+                langchain_messages.append(HumanMessage(content=msg.content))
+            elif msg.message_type == 'ai':
+                ai_message = AIMessage(content=msg.content)
+                # If there are tool calls, add them to the AI message
+                if msg.tool_calls:
+                    ai_message.tool_calls = msg.tool_calls
+                langchain_messages.append(ai_message)
+            elif msg.message_type == 'tool':
+                langchain_messages.append(
+                    ToolMessage(
+                        content=msg.content, 
+                        tool_call_id=msg.tool_call_id
+                    )
+                )
+        
+        return langchain_messages
+    except ChatSession.DoesNotExist:
+        return None
+    except Exception as e:
+        print(f"Error loading chat history: {str(e)}")
+        return None

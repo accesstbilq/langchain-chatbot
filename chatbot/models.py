@@ -35,7 +35,6 @@ class ChatMessage(models.Model):
     content = models.TextField()
     tool_call_id = models.CharField(max_length=100, blank=True, null=True)  # For tool messages
     tool_calls = models.JSONField(default=dict, blank=True)  # Store tool calls data
-    metadata = models.JSONField(default=dict, blank=True)  # Store additional metadata
     response_type = models.CharField(max_length=100, null=True, blank=True)
     tools_used = models.CharField(max_length=100, null=True, blank=True)
     source = models.CharField(max_length=100, null=True, blank=True)

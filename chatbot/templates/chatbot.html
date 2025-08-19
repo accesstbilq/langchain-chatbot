@@ -40,8 +40,19 @@
                 const scrollableDiv = document.getElementById('chat-box');
                 scrollableDiv.scrollTop = scrollableDiv.scrollHeight;
             }
+            function randomStr(len) {
+                return Array.from(crypto.getRandomValues(new Uint8Array(len)))
+                    .map(n => (n % 36).toString(36))
+                    .join('');
+            }
 
-            const sessionId = 'session_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+            const sessionId = 'session--' +
+                            randomStr(8) + '-' +
+                            randomStr(4) + '-' +
+                            randomStr(4) + '-' +
+                            randomStr(4) + '-' +
+                            randomStr(12);
+                            
             // Original sendMessage function (preserved and enhanced)
             function sendMessage() {
                 const userInput = $('#user-input').val().trim();
