@@ -1,24 +1,32 @@
 from django.urls import path
 from . import views
-from . import chatviews
+from . import admin_views
+
+# =============================
+# URL Patterns for Chatbot App
+# =============================
 
 urlpatterns = [
-    #path('', views.chatbot_view, name='chat'),
-    path('', chatviews.dashboard_view, name='dashboard'),
-    path('chatbot/', chatviews.chatbot_view, name='chatbot'),
-    path('chat-input/', chatviews.chatbot_input, name='chatbot-input'),
-    path('get-response/', views.validate_url_view, name='get_message'),
-    path('get-token-usage/<str:run_id>/', chatviews.get_token_usage_view, name='get_token_usage'),
-
-    # New chat history endpoints
-    path('chat-history/', views.get_chat_history_view, name='get_chat_history'),
-    path('search-history/', views.search_chat_history_view, name='search_chat_history'),
-    path('clear-history/', views.clear_chat_history_view, name='clear_chat_history'),
-
-    # New document management routes
-    path('document/', chatviews.document_view, name='document'),
-    path('documents/upload/', chatviews.upload_documents, name='upload_documents'),
-    path('documents/list/', chatviews.list_documents, name='list_documents'),
-    path('documents/delete/', chatviews.delete_document, name='delete_document'),
+    # -------------------------
+    # Main Dashboard & Chatbot
+    # -------------------------
+    #path('', views.dashboard_view, name='dashboard'),                  # Dashboard landing page
+    path('', views.chatbot_view, name='chatbot'),              # Chatbot UI page
+    path('chat-input/', views.chatbot_input, name='chatbot-input'),    # Main chatbot API endpoint (handles user input)
+    path('get-token-usage/<str:run_id>/', views.get_token_usage_view, name='get_token_usage'),  
+    # → Returns token usage (input/output/total) for a given run/session
     
+    path('streaming-welcome/', views.streaming_welcome_message, name='streaming_welcome_message'),  
+    # → Streams welcome message with typing effect when chatbot loads
+
+    # -------------------------
+    # Admin / Document Features
+    # -------------------------
+    path('chathistory/', admin_views.chathistory, name='chathistory'),             # Admin view: chat session history
+    path("chathistory/load/", admin_views.load_chat_history, name="load_chat_history"),  # AJAX endpoint: load chat history dynamically
+
+    path('document/', admin_views.document_view, name='document'),                 # Admin document management page
+    path('documents/upload/', admin_views.upload_documents, name='upload_documents'), # Upload new documents
+    path('documents/list/', admin_views.list_documents, name='list_documents'),       # List uploaded documents
+    path('documents/delete/', admin_views.delete_document, name='delete_document'),   # Delete a document
 ]

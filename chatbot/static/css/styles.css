@@ -521,6 +521,43 @@ body {
 .chat-section {
     flex: 1;
 }
+.menublock{
+    margin: auto;
+    max-width: 1400px;
+    background: linear-gradient(135deg, #667eea, #764ba2);
+    color: white;
+    padding: 20px;
+    margin-bottom: 20px;
+    border-radius: 10px;
+}
+.menublock ul {
+    list-style: none;
+    width: 100%;
+    display: flex;
+    justify-content: center;
+    gap: 30px;
+}
+.menublock ul li a {
+    color: #fff;
+    text-decoration: none;
+}
+.menublock ul li:hover a,.menublock ul li.active a {
+    text-decoration: underline;
+}
+.metadata ul {
+    list-style: none;
+    width: 100%;
+}
+
+.metadata ul li.active,.metadata ul li:hover {
+    background-color: #ddd;
+}
+
+.metadata ul li {
+    padding: 20px;
+    font-size: 15px;
+    cursor: pointer;
+}
 
 @media (max-width: 768px) {
     .main-container {

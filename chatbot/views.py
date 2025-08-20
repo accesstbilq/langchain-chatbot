@@ -1,1094 +1,828 @@
+# =============================
+# Django & Library Imports
+# =============================
 from django.shortcuts import render
 from django.http import JsonResponse
-from .multi_parser import MultiURLVectorizer
-from langchain.tools import tool
+from django.views.decorators.csrf import csrf_exempt
+from django.conf import settings
 import validators
 import requests, traceback
-from bs4 import BeautifulSoup
-from langchain.memory import ConversationVectorStoreTokenBufferMemory
-from langchain.schema import HumanMessage, SystemMessage, AIMessage, BaseMessage
-from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_openai import ChatOpenAI
-from langchain.chains.combine_documents import create_stuff_documents_chain
-from langchain.chains import create_retrieval_chain
-from langchain.chains import create_history_aware_retriever
-from typing import List, Dict, Any
-import json
-from datetime import datetime
-import os
+import json, time
+import os,re
 from dotenv import load_dotenv
-from langchain.agents import initialize_agent, AgentType
-import re
-from django.views.decorators.csrf import csrf_exempt
 import uuid
-import hashlib
+from django.http import StreamingHttpResponse
 
-# Chroma DB imports for chat history
-from langchain_chroma import Chroma
-from langchain_openai.embeddings import OpenAIEmbeddings
-from langchain.schema import Document
+# Database models
+from .models import ChatSession, ChatMessage
 
-# Global variables for chat system and messages
-chat_system = None
+# Parsing HTML
+from bs4 import BeautifulSoup
+
+# LangChain & OpenAI integration
+from langchain_openai import ChatOpenAI
+from langchain.schema import SystemMessage, AIMessage
+from langchain_core.messages import ToolMessage,HumanMessage,AIMessageChunk
+from langchain.tools import tool
+from openai import OpenAIError, APITimeoutError
+
+# =============================
+# Global Variables & Config
+# =============================
+
+# Tracks current chat system state
+chat_system = ""
 messages = []
-current_vectorstore_url = None  # Track which URL the vectorstore was created for
-current_session_id = None  # Track user session
 
-# ------------------- Configuration -------------------
-
-# Load ENV file
+# Load environment variables for OpenAI API
 load_dotenv()
-
-# Get the OpenAI API key from environment variables
 OPENAIKEY = os.getenv('OPEN_AI_KEY')
+MODEL = "gpt-3.5-turbo"
 
-# ------------------- Tools -------------------
+# Tracks name validation per session
+user_name_status = {}  # session_id -> {'name_validated': bool, 'name': str}
 
-@tool("validate_and_fetch_url", return_direct=True)
+# System message prompt for chatbot behavior
+system_message = """You are an expert SEO assistant with name validation capabilities.
+
+    IMPORTANT INSTRUCTIONS:
+    1. FIRST INTERACTION: Always start by asking the user for their name in a friendly way.
+    2. WHEN USER PROVIDES NAME: Use the validate_name tool to validate and format their name properly.
+    3. AFTER NAME VALIDATION: Proceed with your SEO expertise and other capabilities.
+    4. IF USER SENDS MESSAGE WITHOUT VALID NAME: Politely ask them to provide their name first.
+
+    Your expertise includes:
+    - Keyword research and analysis
+    - Content optimization strategies
+    - Technical SEO recommendations
+    - Meta tag optimization
+    - Link building strategies
+    - SEO auditing and reporting
+    - Search ranking analysis
+    - Competitor analysis
+    - Document content analysis for SEO insights
+
+    Guidelines:
+    1. Always start by collecting the user's name using a warm, friendly approach.
+    2. Use the validate_name tool when they provide their name.
+    3. After name validation, provide your full SEO services.
+    4. Only answer SEO-related questions in detail AFTER name is validated.
+    5. If the user asks a question unrelated to SEO, politely say you specialize in SEO and cannot answer other topics.
+    6. If the user clearly asks for a basic arithmetic calculation (e.g., multiplication, addition, subtraction, division), call the appropriate calculation tool.
+    7. If the user provides or asks to validate a URL, call the `validate_and_fetch_url` tool to check its validity and fetch its title.
+    8. You can analyze uploaded documents for SEO-related insights when asked.
+    9. Always provide actionable, practical SEO recommendations with clear steps.
+    10. If user sends any message before providing a valid name, remind them to share their name first.
+    """
+
+# =============================
+# Custom Tool Functions
+# =============================
+@tool
+def multiply(a: float, b: float) -> float:
+    """Multiply two numbers.
+    Args:
+        a: first number
+        b: second number
+    Returns:
+        The product of a and b
+    """
+    global chat_system
+    chat_system = "Tool call - Multiply"
+    return a * b
+
+
+@tool
 def validate_and_fetch_url(url: str) -> str:
-    """Validate a URL and fetch its title if valid."""
+    """Validate a URL and fetch its title if valid.
+    Args:
+        url: The URL to validate and fetch title from
+    Returns:
+        Validation result and title if successful
+    """
+    global chat_system
+    chat_system = "Tool call - URL Validation"
+    
     if not validators.url(url):
         return "❌ Invalid URL. Please enter a valid one (e.g., https://example.com)."
     
     try:
-        response = requests.get(url, timeout=5)
+        response = requests.get(url, timeout=10)
         response.raise_for_status()
 
         soup = BeautifulSoup(response.text, "html.parser")
-        title = soup.title.string if soup.title else "No title found"
+        title = soup.title.string.strip() if soup.title and soup.title.string else "No title found"
         
         return f"✅ URL is valid.\nTitle: {title}"
     except requests.exceptions.RequestException as e:
         return f"⚠️ URL validation passed, but content fetch failed.\nError: {str(e)}"
-    
-@tool("web_scraper_tool", return_direct=True)
-def web_scraper_tool(input_str: str) -> str:
+
+@tool
+def validate_name(name: str) -> str:
+    """Validate a user's name and provide feedback.
+    Args:
+        name: The name to validate
+    Returns:
+        Validation result with personalized greeting
     """
-    Scrape content from a web page.
+    global chat_system
+    chat_system = "Tool call - Name Validation"
+    
+    # Clean the name
+    cleaned_name = name.strip()
+    
+    # Basic validation rules
+    if not cleaned_name or len(cleaned_name.split()) == 0 or len(cleaned_name.split()[0]) < 2:
+        return "❌ Please enter your name to continue."
 
-    Expected format: "https://example.com|text"
-    Supported element types: text, headings, links, images, paragraphs, meta
+    if not cleaned_name:
+        return "❌ Name cannot be empty. Please provide your name."
+    
+    if len(cleaned_name) < 2:
+        return "❌ Name must be at least 2 characters long. Please provide your full name."
+    
+    if len(cleaned_name) > 50:
+        return "❌ Name is too long (max 50 characters). Please provide a shorter version."
+    
+    # Check for valid characters (letters, spaces, hyphens, apostrophes)
+    if not re.match(r"^[a-zA-Z\s\-'\.]+$", cleaned_name):
+        return "❌ Name can only contain letters, spaces, hyphens, and apostrophes. Please provide a valid name."
+    
+    # Check for reasonable format
+    if re.match(r"^[^a-zA-Z]*$", cleaned_name):
+        return "❌ Name must contain at least one letter. Please provide a valid name."
+    
+    # Check for excessive repetition
+    if re.search(r"(.)\1{4,}", cleaned_name):
+        return "❌ Name contains too many repeated characters. Please provide a valid name."
+    
+    # Split name parts
+    name_parts = cleaned_name.split()
+    
+    # Capitalize each part properly
+    formatted_name = " ".join([
+        part.capitalize() if not any(c in part for c in ["-", "'"]) 
+        else "-".join([p.capitalize() for p in part.split("-")]) if "-" in part
+        else "'".join([p.capitalize() for p in part.split("'")]) if "'" in part
+        else part.capitalize()
+        for part in name_parts
+    ])
+    
+    # Generate personalized greeting
+    first_name = name_parts[0].capitalize()
+    
+    if len(name_parts) == 1:
+        greeting = f"✅ Nice to meet you, {formatted_name}! Welcome to your SEO Assistant."
+    elif len(name_parts) == 2:
+        greeting = f"✅ Hello {formatted_name}! Great to have you here, {first_name}."
+    else:
+        greeting = f"✅ Welcome {formatted_name}! I'll call you {first_name} if that's okay."
+    
+    # Store the validated name in session (you might want to save this to database)
+    return f"{greeting}\n\n🎯 Now I'm ready to help you with all your SEO needs!"
+
+@tool
+def check_name_requirement(session_id: str, user_message: str) -> str:
+    """Check if user needs to provide name before proceeding.
+    Args:
+        session_id: Current session ID
+        user_message: User's message content
+    Returns:
+        Message requiring name if needed, empty string if name validated
     """
-    try:
-        # Split input string
-        parts = input_str.strip().split("|")
-        url = parts[0].strip()
-        element_type = parts[1].strip().lower() if len(parts) > 1 else "text"
-    except Exception:
-        return "❌ Invalid input format. Use: <url>|<element_type> (e.g., https://example.com|text)"
-
-    # Validate URL
-    if not validators.url(url):
-        return "❌ Invalid URL. Please provide a valid URL (e.g., https://example.com)."
-
-    try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
-
-        response = requests.get(url, headers=headers, timeout=10)
-        response.raise_for_status()
-
-        soup = BeautifulSoup(response.text, 'html.parser')
-        for script in soup(["script", "style"]):
-            script.decompose()
-
-        result = f"🌐 Web Scraping Results from: {url}\n\n"
-
-        if element_type == "text":
-            text = soup.get_text()
-            lines = (line.strip() for line in text.splitlines())
-            chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
-            text = ' '.join(chunk for chunk in chunks if chunk)
-            if len(text) > 2000:
-                text = text[:2000] + "..."
-            result += f"📄 **Text Content:**\n{text}"
-
-        elif element_type == "headings":
-            headings = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
-            result += "📋 **Headings Found:**\n" + "\n".join(
-                f"- {h.name.upper()}: {h.get_text().strip()}" for h in headings[:20]
-            ) if headings else "📋 **Headings:** No headings found."
-
-        elif element_type == "links":
-            links = soup.find_all('a', href=True)
-            unique_links = set()
-            if links:
-                result += "🔗 **Links Found:**\n"
-                for link in links[:30]:
-                    href = link['href']
-                    text = link.get_text().strip()
-                    if href not in unique_links and href.startswith(('http', 'https', '/')):
-                        unique_links.add(href)
-                        result += f"- {text} → {href}\n"
-            else:
-                result += "🔗 **Links:** No links found."
-
-        elif element_type == "images":
-            images = soup.find_all('img', src=True)
-            result += "🖼️ **Images Found:**\n" + "\n".join(
-                f"- {img.get('alt', 'No alt text')} → {img['src']}" for img in images[:20]
-            ) if images else "🖼️ **Images:** No images found."
-
-        elif element_type == "paragraphs":
-            paragraphs = soup.find_all('p')
-            result += "📝 **Paragraphs:**\n" + "\n\n".join(
-                f"{i+1}. {p.get_text().strip()}" for i, p in enumerate(paragraphs[:10]) if p.get_text().strip()
-            ) if paragraphs else "📝 **Paragraphs:** No paragraphs found."
-
-        elif element_type == "meta":
-            title = soup.find('title')
-            description = soup.find('meta', attrs={'name': 'description'}) or soup.find('meta', attrs={'property': 'og:description'})
-            keywords = soup.find('meta', attrs={'name': 'keywords'})
-            result += "🏷️ **Meta Information:**\n"
-            result += f"**Title:** {title.get_text() if title else 'No title found'}\n"
-            result += f"**Description:** {description.get('content', 'No description') if description else 'No description found'}\n"
-            result += f"**Keywords:** {keywords.get('content', 'No keywords') if keywords else 'No keywords found'}\n"
-
-        else:
-            return f"❌ Invalid element type '{element_type}'. Use: text, headings, links, images, paragraphs, meta."
-
-        return result
-
-    except requests.exceptions.RequestException as e:
-        return f"⚠️ Failed to scrape the webpage.\nError: {str(e)}"
-    except Exception as e:
-        return f"❌ An error occurred during scraping.\nError: {str(e)}"
-
-# ------------------- Helper Functions -------------------
-
-def extract_url_from_message(message: str) -> str:
-    """Extract URL from user message"""
-    # Look for URLs in the message
-    url_pattern = r'https?://[^\s<>"{}|\\^`[\]]+'
-    urls = re.findall(url_pattern, message)
+    global user_name_status
     
-    # Return the first valid URL found
-    for url in urls:
-        if validators.url(url):
-            return url
+    # Check if this session has validated name
+    if session_id not in user_name_status or not user_name_status[session_id].get('name_validated', False):
+        return """🙏 **Please provide your name first!**
+
+I'd love to help you with your SEO needs, but I need to know who I'm talking to first. 
+
+**What's your name?** 
+
+Once you share your name, I'll be able to provide personalized SEO assistance, keyword research, content optimization strategies, and much more! 🚀✨"""
     
-    return None
+    return ""  # Name is validated, proceed normally
 
-def create_default_chat_response(user_message: str) -> str:
-    """Create a response using basic OpenAI chat without RAG"""
-    try:
-        llm = ChatOpenAI(temperature=0.7, openai_api_key=OPENAIKEY, model="gpt-3.5-turbo")
-        
-        # Create a simple conversation
-        system_message = """You are an expert SEO assistant that can use tools to help with search engine optimization tasks. 
-        
-Your expertise includes:
-- Keyword research and analysis
-- Content optimization strategies
-- Technical SEO recommendations
-- Meta tag optimization
-- Link building strategies
-- SEO auditing and reporting
-- Search ranking analysis
-- Competitor analysis
-
-You should provide actionable, data-driven SEO advice and use available tools when they can help gather information or perform specific SEO-related tasks. Always explain your recommendations clearly and provide practical implementation steps."""
-        
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", system_message),
-            ("human", "{input}")
-        ])
-        
-        chain = prompt | llm
-        response = chain.invoke({"input": user_message})
-        
-        return response.content
-        
-    except Exception as e:
-        print(f"Error in default chat: {e}")
-        return "I'm sorry, I encountered an error processing your request. Please try again."
-
-def get_or_create_session_id(request):
-    """Get or create session ID for user"""
-    session_id = request.session.get('chat_session_id')
-    if not session_id:
-        session_id = str(uuid.uuid4())
-        request.session['chat_session_id'] = session_id
-    return session_id
-
-# ------------------- Views -------------------
+# =============================
+# Simple Views (Frontend Pages)
+# =============================
 
 def chatbot_view(request):
-    return render(request, 'chatbot/chat.html')
+    return render(request, 'chatbot.html')
 
+def dashboard_view(request):
+    return render(request, 'dashboard.html')
 
-@csrf_exempt 
-def get_chat_history_view(request):
-    """API endpoint to get chat history for current session"""
-    global chat_system
-    
-    if request.method == 'GET':
-        try:
-            session_id = get_or_create_session_id(request)
-            limit = int(request.GET.get('limit', 50))
-            
-            if chat_system and hasattr(chat_system, 'get_chat_history'):
-                history = chat_system.get_chat_history(limit)
-                return JsonResponse({
-                    'success': True,
-                    'chat_history': history,
-                    'session_id': session_id,
-                    'total_messages': len(history)
-                })
-            else:
-                return JsonResponse({
-                    'success': True,
-                    'chat_history': [],
-                    'session_id': session_id,
-                    'total_messages': 0,
-                    'message': 'No active chat session'
-                })
-                
-        except Exception as e:
-            return JsonResponse({
-                'success': False,
-                'error': str(e)
-            })
-    
+# =============================
+# Global State for Chat Sessions
+# =============================
+chat_history = {}  # Store chat history by session
+tokenresponse = {}  # Store chat history by session
+messagedata = {}  # Store chat history by session
+count = 0
+
+# =============================
+# Token Usage View
+# =============================
+def get_token_usage_view(request, run_id):
+    token_usage = tokenresponse[run_id]
     return JsonResponse({
-        'success': False,
-        'error': 'Only GET requests allowed'
+        'response_type': token_usage['response_type'],
+        'tools_used': token_usage['tools_used'],
+        'source': token_usage['source'],
+        'session': run_id,
+        'run_id': token_usage['run_id'],
+        'input_tokens': token_usage['input_tokens'],
+        'output_tokens': token_usage['output_tokens'],
+        'total_tokens': token_usage['total_tokens']
     })
 
+# =============================
+# Streaming Welcome Message
+# =============================
 @csrf_exempt
-def search_chat_history_view(request):
-    """API endpoint to search through chat history"""
-    global chat_system
+def streaming_welcome_message(request):
+    """Stream the welcome message with typing effect"""
+    if request.method != 'POST':
+        return JsonResponse({'success': False, 'error': 'Only POST requests allowed'})
     
-    if request.method == 'POST':
-        try:
-            query = request.POST.get('query', '').strip()
-            k = int(request.POST.get('k', 5))
-            session_id = get_or_create_session_id(request)
+    try:
+        data = json.loads(request.body.decode('utf-8'))
+        session_id = data.get("session_id", "default")
+        
+        return StreamingHttpResponse(
+            generate_name_request_stream(session_id),
+            content_type='text/plain'
+        )
+    except Exception as e:
+        return JsonResponse({'success': False, 'error': str(e)})
+
+def generate_name_request_stream(session_id):
+    """Generate streaming name request message"""
+    global chat_history, tokenresponse, messagedata, count, user_name_status
+    
+    # Initialize name status for new session
+    if session_id not in user_name_status:
+        user_name_status[session_id] = {'name_validated': False, 'name': ''}
+    
+    welcome_message = """👋 **Welcome to your Personal SEO Assistant!**
+
+I'm here to help you dominate search rankings and grow your online presence! 🚀  
+
+I can assist you with:  
+🔍 **Keyword Research & Analysis**  
+📊 **Content Optimization Strategies**  
+🔧 **Technical SEO Recommendations**  
+🏷️ **Meta Tag Optimization**  
+🔗 **Link Building Strategies**  
+📈 **SEO Auditing & Reporting**  
+🎯 **Search Ranking Analysis**  
+🕵️ **Competitor Analysis**  
+
+I can also help with:  
+- Basic calculations (just ask me to multiply numbers)  
+- URL validation and title fetching  
+- Document analysis for SEO insights
+
+But first, I'd love to know who I'm talking to. **What's your name?**  
+
+Once I know, I'll be able to provide:  
+✨ **Personalized SEO Strategies**  
+✨ **Targeted Recommendations**  
+✨ **A clear roadmap to achieve your SEO goals**  
+
+So please tell me your name, and let's start your SEO journey together! 🚀✨"""
+
+    try:
+        run_id = generate_run_id()
+        count = 0
+        
+        # Initialize session with name collection system message
+        if session_id not in chat_history:
+            chat_history[session_id] = [SystemMessage(content=system_message)]
+            tokenresponse[session_id] = {}
+            messagedata[session_id] = []
             
-            if not query:
-                return JsonResponse({
-                    'success': False,
-                    'error': 'Query parameter is required'
-                })
-            
-            if chat_system and hasattr(chat_system, 'search_history'):
-                results = chat_system.search_history(query, k)
-                return JsonResponse({
-                    'success': True,
-                    'search_results': results,
-                    'query': query,
-                    'session_id': session_id,
-                    'results_count': len(results)
-                })
-            else:
-                return JsonResponse({
-                    'success': False,
-                    'error': 'No active chat session to search'
-                })
-                
-        except Exception as e:
-            return JsonResponse({
-                'success': False,
-                'error': str(e)
+            # Add system message
+            messagedata[session_id].append({
+                "message_type": "system",
+                "content": system_message,
+                "message_id": generate_message_id(),
+                "tool_calls": '',
+                "tool_call_id": '',
+                "count": count,
+                "response_type": 'name_collection',
+                "tools_used": '',
+                "source": 'system',
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0
             })
-    
-    return JsonResponse({
-        'success': False,
-        'error': 'Only POST requests allowed'
-    })
-
-@csrf_exempt
-def clear_chat_history_view(request):
-    """API endpoint to clear chat history for current session"""
-    global chat_system
-    
-    if request.method == 'POST':
-        try:
-            session_id = get_or_create_session_id(request)
+        
+        # Stream the welcome message with typing effect
+        words = welcome_message.split(' ')
+        streamed_content = ""
+        
+        for i, word in enumerate(words):
+            streamed_content += word + " "
             
-            if chat_system and hasattr(chat_system, 'clear_history'):
-                chat_system.clear_history()
-                return JsonResponse({
-                    'success': True,
-                    'message': 'Chat history cleared successfully',
-                    'session_id': session_id
-                })
-            else:
-                return JsonResponse({
-                    'success': True,
-                    'message': 'No active chat session to clear',
-                    'session_id': session_id
-                })
-                
-        except Exception as e:
-            return JsonResponse({
-                'success': False,
-                'error': str(e)
+            # Add slight delay for typing effect
+            time.sleep(0.04)  # Slightly faster for welcome message
+            
+            # Yield the current word
+            yield word + " "
+            
+            # Add pauses at line breaks for better effect
+            if word.endswith('\n') or word.endswith('**') or word.endswith('!'):
+                time.sleep(0.1)
+        
+        # Store the complete welcome message in chat history
+        chat_history[session_id].append(AIMessage(content=welcome_message))
+        
+        # Calculate token usage
+        token_count = len(welcome_message.split())
+        
+        # Store message data
+        messagedata[session_id].append({
+            "message_type": "ai",
+            "content": welcome_message,
+            "message_id": generate_message_id(),
+            "tool_calls": '',
+            "tool_call_id": '',
+            "count": count,
+            "response_type": 'welcome_message',
+            "tools_used": False,
+            "source": 'system',
+            "input_tokens": 0,
+            "output_tokens": token_count,
+            "total_tokens": token_count
+        })
+        
+        # Save to database
+        tokenresponse[session_id].update({
+            'total_tokens': token_count,
+            'input_tokens': 0,
+            'output_tokens': token_count,
+            'response_type': 'welcome_message',
+            'tools_used': False,
+            'source': 'system',
+            'run_id': run_id
+        })
+        
+        session, created = get_or_create_chat_session(session_id, run_id)
+        save_message_to_db(session, messagedata, run_id, count)
+        
+    except Exception as e:
+        yield f"\n[Error occurred: {str(e)}]"
+
+# =============================
+# Chatbot Main Endpoint
+# =============================
+@csrf_exempt
+def chatbot_input(request):
+    """SEO-focused chatbot with name validation and chat history"""
+    global chat_system, chat_history, tokenresponse, count, user_name_status
+
+    if not hasattr(request, 'POST') or request.method != 'POST':
+        return JsonResponse({'success': False, 'error': 'Only POST requests are allowed'})
+    
+    data = json.loads(request.body.decode('utf-8'))
+    usermessage = data.get("message", "")
+    session_id = data.get("session_id", "default")
+
+    runid = generate_run_id()
+
+    if not usermessage:
+        return JsonResponse({'success': False, 'error': 'No message provided'})
+
+    try:
+        # Initialize name status if not exists
+        if session_id not in user_name_status:
+            user_name_status[session_id] = {'name_validated': False, 'name': ''}
+
+        # Check if this looks like a name (simple heuristic)
+        is_potential_name = (
+            len(usermessage.split()) <= 4 and  # Names are usually 1-4 words
+            not any(word in usermessage.lower() for word in ['help', 'seo', 'keyword', 'website', 'search', 'rank', 'optimize', 'what', 'how', 'can', 'you']) and
+            re.match(r'^[a-zA-Z\s\-\'\.]+$', usermessage.strip())  # Only contains name-like characters
+        )
+
+        # Tools available
+        tools = [multiply, validate_and_fetch_url, validate_name, check_name_requirement]
+
+        llm = ChatOpenAI(
+            temperature=0.7,
+            openai_api_key=OPENAIKEY,
+            model=MODEL
+        )
+        llm_with_tools = llm.bind_tools(tools)
+        chat_system = "LLM Call"
+        
+        # Initialize or get existing chat history for this session
+        if session_id not in chat_history:
+            count = 0
+            chat_history[session_id] = [SystemMessage(content=system_message)]
+            tokenresponse[session_id] = {}
+            messagedata[session_id] = []
+            messagedata[session_id].append({
+                "message_type": "system",
+                "content": system_message,
+                "message_id": generate_message_id(),
+                "tool_calls": '',
+                "tool_call_id": '',
+                "count": count,
+                "response_type": '',
+                "tools_used": '',
+                "source": '',
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0
             })
-    
-    return JsonResponse({
-        'success': False,
-        'error': 'Only POST requests allowed'
-    })
+        else:
+            count = count + 1
 
-@csrf_exempt
-def validate_url_view(request):
-    """Enhanced chatbot view that handles URL processing, tools, RAG, and default chat"""
-    global chat_system, messages, current_vectorstore_url,current_session_id
-    
-    if request.method == 'POST':
-        try:
-
-            usermessage = request.POST.get('message', '').strip()
-
-            # Get or create session ID
-            session_id = get_or_create_session_id(request)
-
-            print('session_id',session_id)
-
-            # If session changed, update chat system
-            if current_session_id != session_id:
-                current_session_id = session_id
-                if chat_system and hasattr(chat_system, 'session_id'):
-                    # Create new chat system with new session
-                    if current_vectorstore_url and chat_system.vectorizer:
-                        chat_system = EnhancedWebContentChatWithHistory(
-                            vectorizer=chat_system.vectorizer,
-                            session_id=session_id
-                        )
-
-            # Add user message to conversation history
-            messages.append({"role": "user", "content": usermessage})
-
-            # Step 1: Check if message contains a URL or is URL-related
-            extracted_url = extract_url_from_message(usermessage)
-
-
-            print('extracted_url ********************** ',extracted_url)
-            
-            # Step 2: If URL is found, process it and create/update vectorstore
-            if extracted_url:
-                print(f"URL detected: {extracted_url}")
+        # Get current conversation messages
+        messages = chat_history[session_id].copy()
+        
+        # Check if user needs to provide name first
+        if not user_name_status[session_id]['name_validated']:
+            if is_potential_name:
+                # This looks like a name, try to validate it
+                # Add user message and let the LLM process with validate_name tool
+                messages.append(HumanMessage(content=usermessage))
                 
-                # Check if we need to create a new vectorstore for this URL
-                if current_vectorstore_url != extracted_url:
-                    print(f"Creating new vectorstore for URL: {extracted_url}")
-                    
+                # Add instruction to validate the name
+                validation_instruction = f"The user provided: '{usermessage}'. Please use the validate_name tool to validate this as their name."
+                messages.append(HumanMessage(content=validation_instruction))
+                
+            else:
+                # This doesn't look like a name, ask for name first
+                name_request_message = """🙏 **Please provide your name first!**
+
+I'd love to help you with your SEO needs, but I need to know who I'm talking to first. 
+
+**What's your name?** 
+
+Once you share your name, I'll be able to provide personalized SEO assistance, keyword research, content optimization strategies, and much more! 🚀✨"""
+                
+                # Add user message to history
+                chat_history[session_id].append(HumanMessage(content=usermessage))
+                chat_history[session_id].append(AIMessage(content=name_request_message))
+                
+                # Store message data
+                messagedata[session_id].append({
+                    "message_type": "human",
+                    "content": usermessage,
+                    "message_id": generate_message_id(),
+                    "tool_calls": '',
+                    "tool_call_id": '',
+                    "count": count,
+                    "response_type": '',
+                    "tools_used": '',
+                    "source": '',
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "total_tokens": 0
+                })
+
+                messagedata[session_id].append({
+                    "message_type": "ai",
+                    "content": name_request_message,
+                    "message_id": generate_message_id(),
+                    "tool_calls": '',
+                    "tool_call_id": '',
+                    "count": count,
+                    "response_type": 'name_request',
+                    "tools_used": False,
+                    "source": 'system',
+                    "input_tokens": 0,
+                    "output_tokens": len(name_request_message.split()),
+                    "total_tokens": len(name_request_message.split())
+                })
+
+                # Save to database
+                session, created = get_or_create_chat_session(session_id, runid)
+                save_message_to_db(session, messagedata, runid, count)
+                
+                return StreamingHttpResponse(
+                    stream_static_message(name_request_message),
+                    content_type='text/plain'
+                )
+        else:
+            # Name is validated, proceed normally
+            messages.append(HumanMessage(content=usermessage))
+
+        # Store user message
+        messagedata[session_id].append({
+            "message_type": "human",
+            "content": usermessage,
+            "message_id": generate_message_id(),
+            "tool_calls": '',
+            "tool_call_id": '',
+            "count": count,
+            "response_type": '',
+            "tools_used": '',
+            "source": '',
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0
+        })
+
+        # Get initial AI response
+        ai_msg = llm_with_tools.invoke(messages)
+        
+        # Process tool calls if any
+        if ai_msg.tool_calls:
+            messages.append(ai_msg)
+
+            messagedata[session_id].append({
+                "message_type": "ai",
+                "content": ai_msg.content,
+                "message_id": generate_message_id(),
+                "tool_calls": ai_msg.tool_calls,
+                "tool_call_id": '',
+                "count": count,
+                "response_type": '',
+                "tools_used": '',
+                "source": '',
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0
+            })
+            
+            tool_mapping = {
+                "multiply": multiply,
+                "validate_and_fetch_url": validate_and_fetch_url,
+                "validate_name": validate_name,
+                "check_name_requirement": check_name_requirement
+            }
+
+            for tool_call in ai_msg.tool_calls:
+                tool_name = tool_call["name"]
+                tool_args = tool_call["args"]
+                tool_call_id = tool_call["id"]
+                
+                if tool_name in tool_mapping:
+                    selected_tool = tool_mapping[tool_name]
                     try:
-                        # Create new vectorizer for the URL
-                        vectorizer = MultiURLVectorizer(
-                            urls=[extracted_url],
-                            embedding_model="openai",
-                            chunk_size=1000,
-                            delay_between_requests=0.5
+                        # Run the tool with args
+                        tool_result = selected_tool.invoke(tool_args)
+                        
+                        # Special handling for name validation
+                        if tool_name == "validate_name" and "✅" in tool_result:
+                            # Name validation successful
+                            user_name_status[session_id]['name_validated'] = True
+                            user_name_status[session_id]['name'] = tool_args.get('name', '')
+                        
+                        # Append ToolMessage with matching tool_call_id
+                        messages.append(
+                            ToolMessage(content=str(tool_result), tool_call_id=tool_call_id)
                         )
-                        
-                        summary = vectorizer.process(parallel=False)
-                        
-                        if summary["successful_urls"]:
-                            # Create new chat system with this vectorstore
-                            chat_system = EnhancedWebContentChatWithHistory(
-                                vectorizer=vectorizer,
-                                session_id=session_id
-                            )
-                            current_vectorstore_url = extracted_url
-                            
-                            # Provide initial analysis of the URL
-                            url_info = f"✅ Successfully processed and analyzed: {extracted_url}\n\n"
-                            url_info += f"📊 Processing Summary:\n"
-                            url_info += f"- Documents created: {summary.get('total_documents_created', 0)}\n"
-                            url_info += f"- Session ID: {session_id}\n\n"
-                            url_info += f"- Content analyzed: ✓\n\n"
-                            url_info += "🤖 I'm now ready to answer questions about this website's content. What would you like to know?"
 
-                            # Save this initial interaction
-                            message_id = chat_system.memory_manager.save_message_pair(usermessage, url_info)
-
-                            messages.append({"role": "assistant", "content": url_info})
-                            
-                            return JsonResponse({
-                                'success': True,
-                                'response': url_info,
-                                'session_id': session_id,
-                                'message_id': message_id,
-                                'response_meta': {
-                                    'source': 'url_processing',
-                                    'url_processed': extracted_url,
-                                    'documents_created': summary.get('total_documents_created', 0),
-                                    'response_type': 'vectorstore_created'
-                                }
-                            })
-                        else:
-                            error_msg = f"❌ Failed to process the URL: {extracted_url}"
-                            messages.append({"role": "assistant", "content": error_msg})
-                            
-                            return JsonResponse({
-                                'success': False,
-                                'response': error_msg,
-                                'session_id': session_id,
-                                'response_meta': {
-                                    'source': 'error',
-                                    'error_type': 'url_processing_failed',
-                                    'url': extracted_url
-                                }
-                            })
-                            
+                        messagedata[session_id].append({
+                            "message_type": "tool",
+                            "content": str(tool_result),
+                            "message_id": generate_message_id(),
+                            "tool_calls": ai_msg.tool_calls,
+                            "tool_call_id": tool_call_id,
+                            "count": count,
+                            "response_type": '',
+                            "tools_used": '',
+                            "source": '',
+                            "input_tokens": 0,
+                            "output_tokens": 0,
+                            "total_tokens": 0
+                        })
+                        
                     except Exception as e:
-                        error_msg = f"❌ Error processing URL {extracted_url}: {str(e)}"
-                        messages.append({"role": "assistant", "content": error_msg})
-                        
-                        return JsonResponse({
-                            'success': False,
-                            'response': error_msg,
-                            'session_id': session_id,
-                            'response_meta': {
-                                'source': 'error',
-                                'error_type': 'url_processing_exception',
-                                'url': extracted_url,
-                                'error_message': str(e)
-                            }
+                        messages.append(
+                            ToolMessage(content=f"⚠️ Error running tool {tool_name}: {str(e)}", tool_call_id=tool_call_id)
+                        )
+
+                        messagedata[session_id].append({
+                            "message_type": "tool",
+                            "content": f"⚠️ Error running tool {tool_name}: {str(e)}",
+                            "message_id": generate_message_id(),
+                            "tool_calls": "",
+                            "tool_call_id": tool_call_id,
+                            "count": count,
+                            "response_type": '',
+                            "tools_used": '',
+                            "source": '',
+                            "input_tokens": 0,
+                            "output_tokens": 0,
+                            "total_tokens": 0
                         })
-
-            # Step 3: If we have a chat system (URL was processed), use it
-            if chat_system is not None:
-                print("Using enhanced chat system with vectorstore...")
-                
-                # Try tool response first
-                tool_response = chat_system.get_tool_response(usermessage)
-                
-                if tool_response['success'] and tool_response['tool_used'] != 'unknown':
-                    assistant_message = {
-                        "role": "assistant", 
-                        "content": tool_response["answer"],
-                        "sources": tool_response.get("sources", "")
-                    }
-                    messages.append(assistant_message)
-                    # Save this initial interaction
-
-
-                    message_id = chat_system.memory_manager.save_message_pair(usermessage, tool_response["answer"])
-                    return JsonResponse({
-                        'success': True,
-                        'response': tool_response["answer"],
-                        'session_id': session_id,
-                        'message_id': message_id,
-                        'response_meta': {
-                            'source': 'tool_agent',
-                            'tool_used': tool_response['tool_used'],
-                            'url_processed': current_vectorstore_url,
-                            'response_type': 'tool_response'
-                        }
-                    })
-                
-            if chat_system is None:
-                try:
-                    # Create a minimal chat system without URL vectorstore
-                    # This assumes you have a way to create chat system without URLs
-                    chat_system = EnhancedWebContentChatWithHistory(
-                        vectorizer=None,  # No URL vectorizer
-                        session_id=session_id
+                        
+                else:
+                    messages.append(
+                        ToolMessage(content=f"Unknown tool: {tool_name}", tool_call_id=tool_call_id)
                     )
-                    current_vectorstore_url = None
-                    print("Created default chat system for session management")
-                except Exception as e:
-                    print(f"Could not create default chat system: {e}")
-                    # Use fallback approach
-                    pass
+                    messagedata[session_id].append({
+                        "message_type": "tool",
+                        "content": f"Unknown tool: {tool_name}",
+                        "message_id": generate_message_id(),
+                        "tool_calls": "",
+                        "tool_call_id": tool_call_id,
+                        "count": count,
+                        "response_type": '',
+                        "tools_used": '',
+                        "source": '',
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "total_tokens": 0
+                    })
             
-            # Step 4: If no vectorstore and not URL-related, use default chat
-            print("Using default chat mode...")
+            # Store the conversation history (user message + AI response + tool messages)
+            chat_history[session_id].append(HumanMessage(content=usermessage))
+            chat_history[session_id].extend(messages[len(chat_history[session_id]):])
             
-            default_response = create_default_chat_response(usermessage)
-            
-            assistant_message = {
-                "role": "assistant", 
-                "content": default_response
-            }
-            # Save this initial interaction
-            #chat_system.memory_manager.save_message_pair(usermessage, default_response)
-            if chat_system and hasattr(chat_system, 'memory_manager') and chat_system.memory_manager:
-                message_id = chat_system.memory_manager.save_message_pair(usermessage, default_response)
-            messages.append(assistant_message)
-            
-            return JsonResponse({
-                'success': True,
-                'response': default_response,
-                'session_id': session_id,
-                'message_id': message_id,
-                'response_meta': {
-                    'source': 'default_chat',
-                    'response_type': 'general_conversation',
-                    'has_vectorstore': chat_system is not None
-                }
-            })
-                
-        except json.JSONDecodeError:
-            return JsonResponse({
-                'success': False,
-                'response': 'Invalid JSON data provided.',
-                'session_id': session_id,
-                'response_meta': {
-                    'source': 'error',
-                    'error_type': 'json_decode_error'
-                }
-            })
-
-        except Exception as e:
-            print(f"Exception in validate_url_view: {e}")
-            print(f"Full traceback: {traceback.format_exc()}")
-            
-            return JsonResponse({
-                'success': False,
-                'response': f'Error processing request: {str(e)}',
-                'response_meta': {
-                    'source': 'error',
-                    'error_type': 'general_exception',
-                    'error_message': str(e)
-                }
-            })
-        
-    return JsonResponse({
-        'success': False,
-        'response': 'Only POST requests are allowed.',
-        'response_meta': {
-            'source': 'error',
-            'error_type': 'invalid_method'
-        }
-    })
-
-
-# ------------------- Enhanced Classes (Keep existing classes unchanged) -------------------
-
-class PersistentChatHistoryManager:
-    """Manages chat history and memory for conversational interactions"""
-    
-    def __init__(self, session_id: str, vectorstore=None, window_token_limit: int = 1000):
-
-        self.session_id = session_id
-        self.window_token_limit = window_token_limit
-
-        # Initialize embeddings for chat history
-        self.embeddings = OpenAIEmbeddings(openai_api_key=OPENAIKEY, model="text-embedding-3-small")
-        
-        # Create separate Chroma DB for chat history
-        self.chat_history_db = Chroma(
-            collection_name=f"chat_history_{session_id}",
-            embedding_function=self.embeddings,
-            persist_directory="./chroma_db_chat_history"
-        )
-
-        # Initialize LLM
-        self.llm = ChatOpenAI(temperature=0, openai_api_key=OPENAIKEY)
-
-        
-        # Initialize traditional memory for immediate context
-        if vectorstore:
-            retriever = vectorstore.as_retriever(
-                search_type="mmr",
-                search_kwargs={"k": 5, "fetch_k": 20}
+            return StreamingHttpResponse(
+                build_stream_response(llm_with_tools, messages, ai_msg, session_id, chat_system, count),
+                content_type='text/plain'
             )
-            self.memory = ConversationVectorStoreTokenBufferMemory(
-                retriever=retriever,
-                memory_key="chat_history",
-                return_messages=True,
-                output_key="answer",
-                llm=self.llm,
-                max_token_limit=window_token_limit,
-            )
+
         else:
-            self.memory = None
+            # No tools called, store conversation and stream response
+            chat_history[session_id].append(HumanMessage(content=usermessage))
+            
+            return StreamingHttpResponse(
+                build_stream_response(llm_with_tools, messages, ai_msg, session_id, chat_system, count),
+                content_type='text/plain'
+            )
 
-        # Load existing chat history from Chroma DB
-        self._load_chat_history()
+    except Exception as e:
+        traceback.print_exc()
+        return JsonResponse({
+            'success': False,
+            'error': f'Processing error: {str(e)}'
+        })
+
+# =============================
+# Streaming Helpers
+# =============================
+def stream_static_message(message):
+    """Stream a static message with typing effect"""
+    words = message.split(' ')
     
-    def get_memory_messages(self) -> List[BaseMessage]:
-        """Get memory messages for context in chains"""
-        if self.memory and hasattr(self.memory, 'chat_memory'):
-            return self.memory.chat_memory.messages
-        return []
-
-    def _generate_message_id(self) -> str:
-        """Generate unique message ID"""
-        timestamp = datetime.now().isoformat()
-        return hashlib.md5(f"{self.session_id}_{timestamp}".encode()).hexdigest()
-
-    def _load_chat_history(self):
-        """Load existing chat history from Chroma DB into memory"""
-        try:
-            # Get all messages for this session, ordered by timestamp
-            collection = self.chat_history_db.get()
-            if collection['ids']:
-                # Sort by timestamp metadata
-                messages_with_time = []
-                for i, doc_id in enumerate(collection['ids']):
-                    metadata = collection['metadatas'][i]
-                    content = collection['documents'][i]
-                    messages_with_time.append((metadata['timestamp'], content, metadata))
-                
-                # Sort by timestamp
-                messages_with_time.sort(key=lambda x: x[0])
-                
-                # Rebuild memory from sorted messages
-                if self.memory:
-                    for timestamp, content, metadata in messages_with_time:
-                        if metadata['message_type'] == 'human_ai_pair':
-                            # Parse the human-AI pair
-                            parts = content.split("AI: ", 1)
-                            if len(parts) == 2:
-                                human_part = parts[0].replace("Human: ", "").strip()
-                                ai_part = parts[1].strip()
-                                
-                                # Add to memory
-                                self.memory.save_context(
-                                    {"input": human_part},
-                                    {"answer": ai_part}
-                                )
-                
-                print(f"Loaded {len(messages_with_time)} messages from chat history")
-                
-        except Exception as e:
-            print(f"Error loading chat history: {e}")
-
-    def save_message_pair(self, human_input: str, ai_response: str) -> str:
-        """Save a human-AI conversation pair to Chroma DB"""
-        try:
-            # Create combined document for the conversation pair
-            message_content = f"Human: {human_input}\nAI: {ai_response}"
-            message_id = self._generate_message_id()
-            
-            # Metadata for the message
-            metadata = {
-                'session_id': self.session_id,
-                'message_id': message_id,
-                'timestamp': datetime.now().isoformat(),
-                'message_type': 'human_ai_pair',
-                'human_input': human_input[:500],  # Truncate for metadata
-                'ai_response': ai_response[:500],   # Truncate for metadata
-                'content_length': len(message_content)
-            }
-            
-            # Create document
-            document = Document(
-                page_content=message_content,
-                metadata=metadata
-            )
-            
-            # Add to Chroma DB
-            self.chat_history_db.add_documents([document])
-            
-            # Also save to traditional memory if available
-            if self.memory:
-                self.memory.save_context(
-                    {"input": human_input},
-                    {"answer": ai_response}
-                )
-            
-            print(f"Saved message pair to chat history: {message_id}")
-            return message_id
-            
-        except Exception as e:
-            print(f"Error saving message pair: {e}")
-            return None
-
-    def get_chat_history(self, limit: int = 50) -> List[Dict[str, str]]:
-        """Get formatted chat history for display"""
-        try:
-            # Get recent messages from Chroma DB
-            collection = self.chat_history_db.get()
-            if not collection['ids']:
-                return []
-            
-            # Sort by timestamp and get recent messages
-            messages_with_time = []
-            for i, doc_id in enumerate(collection['ids']):
-                metadata = collection['metadatas'][i]
-                content = collection['documents'][i]
-                messages_with_time.append((metadata['timestamp'], content, metadata))
-            
-            # Sort by timestamp (newest first) and limit
-            messages_with_time.sort(key=lambda x: x[0], reverse=True)
-            recent_messages = messages_with_time[:limit]
-            
-            # Format for display
-            formatted_history = []
-            for timestamp, content, metadata in reversed(recent_messages):  # Reverse to show oldest first
-                if metadata['message_type'] == 'human_ai_pair':
-                    parts = content.split("AI: ", 1)
-                    if len(parts) == 2:
-                        human_part = parts[0].replace("Human: ", "").strip()
-                        ai_part = parts[1].strip()
-                        
-                        formatted_history.append({
-                            "role": "human",
-                            "content": human_part,
-                            "timestamp": timestamp
-                        })
-                        formatted_history.append({
-                            "role": "ai", 
-                            "content": ai_part,
-                            "timestamp": timestamp
-                        })
-            
-            return formatted_history
-            
-        except Exception as e:
-            print(f"Error getting chat history: {e}")
-            return []
+    for word in words:
+        time.sleep(0.05)  # Typing effect
+        yield word + " "
+        
+        # Add pauses at line breaks for better effect
+        if word.endswith('\n') or word.endswith('**') or word.endswith('!'):
+            time.sleep(0.1)
     
-    def search_chat_history(self, query: str, k: int = 5) -> List[Dict[str, Any]]:
-        """Search through chat history using vector similarity"""
-        try:
-            results = self.chat_history_db.similarity_search(query, k=k)
+def build_stream_response(llm_with_tools, messages, ai_msg, session_id, chat_system, count):
+    """Unified streaming response generator with token usage tracking"""
+    try:
+        final_response_content = ""
+        usage_metadata = None
+        run_id = None
+
+        for chunk in llm_with_tools.stream(messages):
+            if isinstance(chunk, AIMessageChunk) and chunk.content:
+                final_response_content += chunk.content
+                run_id = chunk.id
+                yield chunk.content
+
+            # Capture usage metadata (Anthropic supports this in stream)
+            if hasattr(chunk, "usage_metadata") and chunk.usage_metadata:
+                usage_metadata = chunk.usage_metadata
+
+        # Store the final AI response in chat history
+        if final_response_content:
+            if usage_metadata is None:  # Fallback for OpenAI
+                resp = llm_with_tools.invoke(messages, config={"include_usage_metadata": True})
+                usage_metadata = resp.usage_metadata
+
+            chat_history[session_id].append(AIMessage(content=final_response_content))
+
+            # Save token usage
+            response_type = 'Tool Usage' if ai_msg.tool_calls else 'General Conversation'
+            tools_used = len(ai_msg.tool_calls) > 0 if ai_msg.tool_calls else False
             
-            formatted_results = []
-            for doc in results:
-                formatted_results.append({
-                    'content': doc.page_content,
-                    'metadata': doc.metadata,
-                    'timestamp': doc.metadata.get('timestamp'),
-                    'message_id': doc.metadata.get('message_id')
-                })
-            
-            return formatted_results
-            
-        except Exception as e:
-            print(f"Error searching chat history: {e}")
-            return []
-
-    def clear_chat_history(self):
-        """Clear chat history for current session"""
-        try:
-            # Clear Chroma DB collection
-            self.chat_history_db.delete_collection()
-            
-            # Recreate collection
-            self.chat_history_db = Chroma(
-                collection_name=f"chat_history_{self.session_id}",
-                embedding_function=self.embeddings,
-                persist_directory="./chroma_db_chat_history"
-            )
-            
-            # Clear traditional memory
-            if self.memory:
-                self.memory.clear()
-            
-            print(f"Cleared chat history for session: {self.session_id}")
-            
-        except Exception as e:
-            print(f"Error clearing chat history: {e}")
-
-    def add_message(self, human_input: str, ai_response: str):
-        """Add a conversation pair to memory"""
-        try:
-            self.memory.save_context(
-                {"input": human_input},
-                {self.memory.output_key: ai_response}
-            )
-        except Exception as e:
-            print(f"Error saving to memory: {e}")
-    
-    def clear_memory(self):
-        """Clear the conversation memory"""
-        self.memory.clear()
-
-
-class EnhancedWebContentChatWithHistory:
-    """Enhanced web content chat with memory and context awareness"""
-    
-    def __init__(self, vectorizer: MultiURLVectorizer = None,session_id: str = None):
-        self.vectorizer = vectorizer
-        self.session_id = session_id or str(uuid.uuid4())
-        self.memory_manager = None
-
-        # Initialize persistent history manager
-        self.memory_manager = PersistentChatHistoryManager(
-            session_id=self.session_id,
-            vectorstore=vectorizer.vectorstore if vectorizer else None
-        )
-
-
-        # if vectorizer and vectorizer.vectorstore:
-        #     self.memory_manager = ChatMemoryManager(vectorstore=vectorizer.vectorstore)
-        
-        self.system_prompt = f"""You are an expert SEO assistant and web content analyzer. You answer questions based on web content that has been processed and stored in a vector database.
-
-Context about the processed content:
-- The content is sourced from live webpages (HTML parsed and chunked)
-- Each chunk may include metadata such as <title>, <meta description>, <h1>, FAQ, structured data, or keyword-dense paragraphs
-- The data has been embedded and stored for semantic search
-
-Your expertise includes:
-- SEO analysis: title tags, meta descriptions, headings (H1/H2), content quality, keyword usage, internal linking, and crawlability
-- Content analysis: readability, user intent, content gaps, and optimization opportunities
-- Technical SEO: page structure, schema markup, and HTML optimization
-- General web content questions and recommendations
-
-Instructions:
-- Always provide helpful, accurate responses based on the available context
-- When discussing SEO elements, mention the source URL when referring to extracted data
-- If asked to improve SEO, provide actionable suggestions based on best practices
-- For general questions, use your knowledge combined with the context from the processed content
-- If the context doesn't provide a specific answer, clearly state what information is available and provide general guidance
-- Be conversational, helpful, and avoid being overly technical unless requested
-- Always aim to be constructive and solution-oriented
-
-Current time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-Session ID: {self.session_id}
-"""
-
-        self.contextualize_q_system_prompt = """Given a chat history and the latest user question which might reference context in the chat history, formulate a standalone question which can be understood without the chat history. Do NOT answer the question, just reformulate it if needed and otherwise return it as is."""
-
-        self.contextualize_q_prompt = ChatPromptTemplate.from_messages([
-            ("system", self.contextualize_q_system_prompt),
-            MessagesPlaceholder("chat_history"),
-            ("human", "{input}"),
-        ])
-
-        self.qa_prompt = ChatPromptTemplate.from_messages([
-            ("system", self.system_prompt),
-            MessagesPlaceholder("chat_history"),
-            ("human", "Based on the following context and your knowledge, please answer my question:\n\nContext: {context}\n\nQuestion: {input}")
-        ])
-
-    def setup_retrieval_chain(self):
-        """Setup the retrieval chain with memory"""
-        if not self.vectorizer or not self.vectorizer.vectorstore:
-            raise ValueError("Vector store not available. Process URLs first.")
-        
-        # if not self.memory_manager:
-        #     self.memory_manager = ChatMemoryManager(vectorstore=self.vectorizer.vectorstore)
-        
-        retriever = self.vectorizer.vectorstore.as_retriever(
-            search_type="mmr",
-            search_kwargs={"k": 3, "fetch_k": 10}  # Increased for better context
-        )
-        
-        history_aware_retriever = create_history_aware_retriever(
-            self.memory_manager.llm,
-            retriever,
-            self.contextualize_q_prompt
-        )
-        
-        question_answer_chain = create_stuff_documents_chain(
-            self.memory_manager.llm,
-            self.qa_prompt
-        )
-        
-        self.rag_chain = create_retrieval_chain(
-            history_aware_retriever,
-            question_answer_chain
-        )
-
-    def setup_tool_agent(self):
-        """Setup an agent that uses tools along with memory"""
-        if not self.memory_manager:
-            raise ValueError("Memory manager not initialized")
-
-        tools = [validate_and_fetch_url, web_scraper_tool]
-
-        # Set correct output key for tool agent
-        try:
-            # Create a copy of memory with correct output key for tools
-            tool_memory = ConversationVectorStoreTokenBufferMemory(
-                retriever=self.memory_manager.memory.retriever,
-                memory_key="chat_history",
-                return_messages=True,
-                output_key="output",  # Tools typically use "output"
-                llm=self.memory_manager.llm,
-                max_token_limit=1000,
-            )
-            
-            self.tool_agent = initialize_agent(
-                tools=tools,
-                llm=self.memory_manager.llm,
-                agent=AgentType.CONVERSATIONAL_REACT_DESCRIPTION,
-                memory=tool_memory,
-                verbose=True,
-                return_direct=False,
-            )
-            self.use_manual_memory = False
-            print("DEBUG: Agent created successfully with dedicated memory")
-            
-        except Exception as e:
-            print(f"DEBUG: Failed to create agent with memory: {e}")
-            # Fallback to agent without memory
-            self.tool_agent = initialize_agent(
-                tools=tools,
-                llm=self.memory_manager.llm,
-                agent=AgentType.CONVERSATIONAL_REACT_DESCRIPTION,
-                verbose=True,
-                return_direct=False,
-            )
-            self.use_manual_memory = True
-            print("DEBUG: Agent created without memory, will handle manually")
-
-    def get_tool_response(self, user_input: str) -> Dict[str, Any]:
-        """Get response using tool agent with memory"""
-        try:
-            if not hasattr(self, 'tool_agent'):
-                self.setup_tool_agent()
-
-            # Detect which tool might be used
-            tool_used = self._detect_tool_from_input(user_input)
-            
-            # Only proceed with tool if a specific tool is detected
-            if tool_used == 'unknown':
-                return {
-                    "answer": "",
-                    "success": True,
-                    "sources": "",
-                    "tool_used": "unknown",
-                    "metadata": {"tool_detection": "no_specific_tool_detected"}
-                }
-
-            # Format input for agent
-            formatted_input = {"input": user_input} if isinstance(user_input, str) else user_input
-                
-            result = self.tool_agent.invoke(formatted_input)
-
-            print('result',result)
-            
-            # Extract response text
-            if isinstance(result, dict):
-                response_text = (
-                    result.get("output") or 
-                    result.get("answer") or 
-                    result.get("result") or 
-                    str(result)
-                )
-            else:
-                response_text = str(result)
-            
-            # Handle manual memory if needed
-            if hasattr(self, 'use_manual_memory') and self.use_manual_memory:
-                try:
-                    self.memory_manager.add_message(user_input, response_text)
-                except Exception as memory_error:
-                    print(f"DEBUG: Manual memory save failed: {memory_error}")
-            
-            return {
-                "answer": response_text,
-                "success": True,
-                "sources": self._extract_sources_from_response(response_text),
-                "tool_used": tool_used,
-                "metadata": {
-                    "response_length": len(response_text),
-                    "tool_detected": tool_used,
-                    "memory_handling": "manual" if hasattr(self, 'use_manual_memory') and self.use_manual_memory else "automatic"
-                }
-            }
-
-        except Exception as e:
-            print(f"Tool agent error: {e}")
-            return {
-                "answer": f"Tool error: {str(e)}",
-                "success": False,
-                "error": str(e),
-                "sources": "",
-                "tool_used": "unknown",
-                "metadata": {"error_type": type(e).__name__}
-            }
-    
-    def get_chat_history(self, limit: int = 50) -> List[Dict[str, str]]:
-        """Get chat history for this session"""
-        return self.memory_manager.get_chat_history(limit)
-
-    def search_history(self, query: str, k: int = 5) -> List[Dict[str, Any]]:
-        """Search through chat history"""
-        return self.memory_manager.search_chat_history(query, k)
-
-    def clear_history(self):
-        """Clear chat history for current session"""
-        self.memory_manager.clear_chat_history()
-
-    def _extract_sources_from_response(self, response_text: str) -> str:
-        """Extract source URLs or references from response text"""
-        url_pattern = r'https?://[^\s<>"{}|\\^`[\]]+'
-        urls = re.findall(url_pattern, response_text)
-        
-        if urls:
-            return ", ".join(urls)
-        
-        if "✅" in response_text and "URL is valid" in response_text:
-            return "URL validation tool"
-        elif "🌐 Web Scraping Results" in response_text:
-            return "Web scraping tool"
-        
-        return ""
-
-    def _detect_tool_from_input(self, user_input: str) -> str:
-        """Detect which tool might be used based on user input"""
-        input_lower = user_input.lower()
-        
-        # More specific patterns for tool detection
-        validation_keywords = ['validate url', 'check url', 'url valid', 'verify url', 'test url']
-        scraping_keywords = ['scrape', 'extract content', 'get content', 'fetch content', 'scrape website']
-        
-        if any(keyword in input_lower for keyword in validation_keywords):
-            return "validate_and_fetch_url"
-        elif any(keyword in input_lower for keyword in scraping_keywords):
-            return "web_scraper_tool"
-        else:
-            return "unknown"
-
-    def get_response(self, user_input: str) -> Dict[str, Any]:
-        """Get response with memory context using RAG"""
-        try:
-            if not hasattr(self, 'rag_chain'):
-                self.setup_retrieval_chain()
-            
-            # Get chat history for context
-
-            chat_history = self.memory_manager.get_memory_messages()
-            # chat_history = []
-            # if self.memory_manager and hasattr(self.memory_manager.memory, 'chat_memory'):
-            #     chat_history = self.memory_manager.memory.chat_memory.messages
-            
-            # Invoke the RAG chain
-            response = self.rag_chain.invoke({
-                "input": user_input,
-                "chat_history": chat_history
+            tokenresponse[session_id].update({
+                'total_tokens': usage_metadata['total_tokens'],
+                'input_tokens': usage_metadata['input_tokens'],
+                'output_tokens': usage_metadata['output_tokens'],
+                'response_type': response_type,
+                'tools_used': tools_used,
+                'source': chat_system,
+                'run_id': run_id
             })
-            
-            # Save conversation to persistent storage
-            message_id = self.memory_manager.save_message_pair(user_input, response["answer"])
+            session, create = get_or_create_chat_session(session_id, run_id)
 
-            # Save to memory
-            if self.memory_manager:
-                self.memory_manager.add_message(user_input, response["answer"])
-            
-            return {
-                "answer": response["answer"],
-                "source_documents": response.get("context", []),
-                "success": True,
-                "session_id": self.session_id,
-                "message_id": message_id,
-                "metadata": {
-                    "context_docs_used": len(response.get("context", [])),
-                    "response_type": "rag_with_persistent_history"
-                }
+            messagedata[session_id].append({
+                "message_type": "ai",
+                "content": final_response_content,
+                "message_id": generate_message_id(),
+                "tool_calls": '',
+                "tool_call_id": '',
+                "count": count,
+                "response_type": response_type,
+                "tools_used": tools_used,
+                "source": chat_system,
+                "input_tokens": usage_metadata['input_tokens'],
+                "output_tokens": usage_metadata['output_tokens'],
+                "total_tokens": usage_metadata['total_tokens']
+            })
+
+            save_message_to_db(session, messagedata, run_id, count)
+
+    except (OpenAIError, APITimeoutError) as e:
+        yield f"\n[Error occurred: {str(e)}]"
+
+
+# =============================
+# Database Helpers
+# =============================
+def get_or_create_chat_session(session_id, run_id=None):
+    """Get existing chat session or create new one"""
+    try:
+        session, created = ChatSession.objects.get_or_create(
+            session_id=session_id,
+            defaults={
+                'run_id': run_id,
+                'is_active': True
             }
-            
-        except Exception as e:
-            print(f"RAG system error: {e}")
-            error_message = f"I encountered an error processing your question: {str(e)}"
-            
-            # Still try to save error to memory
-            if self.memory_manager:
-                try:
-                    self.memory_manager.save_message_pair(user_input, error_message)
-                    self.memory_manager.add_message(user_input, error_message)
-                except:
-                    pass
-                    
-            return {
-                "answer": error_message,
-                "source_documents": [],
-                "success": False,
-                "error": str(e),
-                "session_id": self.session_id,
-                "metadata": {"error_type": type(e).__name__}
-            }
+        )
         
+        # Update run_id if provided and different
+        if run_id and session.run_id != run_id:
+            session.run_id = run_id
+            session.save(update_fields=['run_id', 'updated_at'])
+            
+        return session, created
+    except Exception as e:
+        print(f"Error creating/getting chat session: {str(e)}")
+        raise
+
+def save_message_to_db(session, messagedata, run_id=None, count=0):
+    """Save a single message to database"""
+    try:
+        
+        # Get the next order number for this session
+        last_message = ChatMessage.objects.filter(session=session).order_by('-order').first()
+        next_order = (last_message.order + 1) if last_message else 1
+        
+        # Generate IDs if not provided
+        if not run_id:
+            run_id = session.run_id or generate_run_id()
+        
+
+        savemessagedata = messagedata[session.session_id] 
+
+        for msg in savemessagedata:
+            messagecount = msg["count"]
+            if messagecount == count:
+                message_type = msg["message_type"]
+                content = msg["content"]
+                message_id = msg["message_id"]
+                tool_calls = msg["tool_calls"]
+                tool_call_id = msg["tool_call_id"]
+                response_type = msg["response_type"]
+                tools_used = msg["tools_used"]
+                source = msg["source"]
+                input_tokens   = msg["input_tokens"]
+                output_tokens   = msg["output_tokens"]
+                total_tokens   = msg["total_tokens"]
+                # Create the message
+                ChatMessage.objects.create(
+                    session=session,
+                    message_id=message_id,
+                    run_id=run_id,
+                    message_type=message_type,
+                    content=content,
+                    tool_call_id=tool_call_id or '',
+                    tool_calls=tool_calls or {},
+                    tools_used= tools_used,
+                    response_type= response_type,
+                    source= source,
+                    input_tokens= input_tokens,
+                    output_tokens= output_tokens,
+                    total_tokens= total_tokens,
+                    order=next_order
+                )
+        
+        # # Update session's updated_at timestamp and run_id
+        session.run_id = run_id
+        session.save(update_fields=['updated_at', 'run_id'])
+        
+        return count
+    except Exception as e:
+        print(f"Error saving message to DB: {str(e)}")
+        raise
+
+# =============================
+# Utility Helpers
+# =============================
+def generate_message_id():
+    """Generate a unique message ID"""
+    return f"msg--{uuid.uuid4().hex[:8]}-{uuid.uuid4().hex[:4]}-{uuid.uuid4().hex[:4]}-{uuid.uuid4().hex[:4]}-{uuid.uuid4().hex[:12]}"
+
+def generate_run_id():
+    """Generate a unique run ID for conversation tracking"""
+    return f"run--{uuid.uuid4().hex[:8]}-{uuid.uuid4().hex[:4]}-{uuid.uuid4().hex[:4]}-{uuid.uuid4().hex[:4]}-{uuid.uuid4().hex[:12]}"
+

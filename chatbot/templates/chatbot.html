@@ -8,13 +8,26 @@
         <link rel="stylesheet" href="{% static 'css/styles.css' %}">
     </head>
     <body>
-        <div class="main-container">
+        
+        <div class="menublock">
+            <ul>
+                <li class="active"><a href="/">Chatbot</a></li>
+                <li><a href="/chathistory/">Chat History</a></li>
+                <li><a href="/document/">Manage Document</a></li>
+            </ul>
+        </div>
+        <div class="main-container" style="height: calc(100vh - 150px);">
             <!-- MetaData Container -->
+             
             <div class="metadata-comtainer" id="metadata_comtainer">
                 <div class="chat-header">
                     MetaData
                 </div>
-                <div class="metadata"></div>
+                <div class="metadata">
+
+
+
+                </div>
             </div>
             <!-- Chat Section -->
             <div class="chat-section">
@@ -35,6 +48,51 @@
         </div>
 
         <script>
+            const sessionId = 'session--' +
+                            randomStr(8) + '-' +
+                            randomStr(4) + '-' +
+                            randomStr(4) + '-' +
+                            randomStr(4) + '-' +
+                            randomStr(12);
+            $(document).ready(function(){
+                loadwelcomemessage();
+            })
+
+            function loadwelcomemessage(){
+                $('#chat-box').scrollTop($('#chat-box')[0].scrollHeight);
+                let result = "";
+                const decoder = new TextDecoder();
+                $('#loader').show();
+                const agentChatDiv = document.createElement("div");
+                agentChatDiv.className = "message bot";
+                document.querySelector(".chat-box").appendChild(agentChatDiv);
+                fetch('/streaming-welcome/', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ session_id: sessionId })
+                }).then(response => {
+                    $('#chat-box').scrollTop($('#chat-box')[0].scrollHeight);
+                    const reader = response.body.getReader();
+                    function read() {
+                        reader.read().then(({ done, value }) => {
+                            if (done) return;
+
+                            const chunk = decoder.decode(value, { stream: true });
+                            result += chunk;
+                            agentChatDiv.innerHTML += chunk.replace(/\n/g, "<br>");
+                            scrollToBottom();
+                            read();
+                        });
+                    }
+                    read();
+                }).catch(error => {
+                    $('#chat-box').append('<div class="message bot">❌ Error: ' + error.message + '</div>');
+                }).finally(() => {
+                    $('#chat-box').scrollTop($('#chat-box')[0].scrollHeight);
+                    $('#loader').hide();
+                });
+
+            }
 
             function scrollToBottom() {
                 const scrollableDiv = document.getElementById('chat-box');
@@ -46,79 +104,70 @@
                     .join('');
             }
 
-            const sessionId = 'session--' +
-                            randomStr(8) + '-' +
-                            randomStr(4) + '-' +
-                            randomStr(4) + '-' +
-                            randomStr(4) + '-' +
-                            randomStr(12);
+            
                             
             // Original sendMessage function (preserved and enhanced)
             function sendMessage() {
                 const userInput = $('#user-input').val().trim();
-                
+                if (!userInput) return; // prevent empty messages
 
                 let result = "";
                 const decoder = new TextDecoder();
 
-
-                //if (!userInput) return;
-
+                // Append user message
                 $('#chat-box').append('<div class="message user">You: ' + userInput + '</div>');
+                scrollToBottom();   // ✅ scroll immediately after adding user message
+
                 $('#user-input').val('');
                 $('#loader').show();
+
+                // Create bot message container
                 const agentChatDiv = document.createElement("div");
                 agentChatDiv.className = "message bot";
                 document.querySelector(".chat-box").appendChild(agentChatDiv);
+                scrollToBottom();   // ✅ make sure bot container is visible too
+
                 fetch('/chat-input/', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ message: userInput,session_id: sessionId })
+                    body: JSON.stringify({ message: userInput, session_id: sessionId })
                 }).then(response => {
-                    scrollToBottom();
-
-                    // const runId = response.headers.get('x-run-id');
-                    // console.log('x-run-id:', runId);
-                    
-                    // // You can store it in a variable or use it as needed
-                    // // For example, store it globally or in a data attribute
-                    // window.currentRunId = runId;
                     const reader = response.body.getReader();
                     function read() {
                         reader.read().then(({ done, value }) => {
                             if (done) {
-                                //✅ When done streaming, get token usage
+                                // fetch token usage when done
                                 if (sessionId) {
                                     $.get(`/get-token-usage/${sessionId}/`, function(data) {
-                                        console.log("Token usage:", data);
-                                        // You can display this in your UI
                                         let metadataHtml = `
-                                                <p>Response Type: ${data.response_type}</p>
-                                                <p>Source: ${data.source}</p>
-                                                <p>Total Tokens: ${data.total_tokens}</p>
-                                                <p>Input Tokens: ${data.input_tokens}</p>
-                                                <p>Output Tokens: ${data.output_tokens}</p>
-                                                <p>Session Id: ${data.session}</p>
-                                                <p>Run Id: ${data.run_id}</p>
-                                            `;
-                                            $('.metadata').html(metadataHtml);
+                                            <p>Response Type: ${data.response_type}</p>
+                                            <p>Source: ${data.source}</p>
+                                            <p>Total Tokens: ${data.total_tokens}</p>
+                                            <p>Input Tokens: ${data.input_tokens}</p>
+                                            <p>Output Tokens: ${data.output_tokens}</p>
+                                            <p>Session Id: ${data.session}</p>
+                                            <p>Run Id: ${data.run_id}</p>
+                                        `;
+                                        $('.metadata').html(metadataHtml);
                                     }).fail(err => {
                                         console.error("Failed to fetch token usage", err);
                                     });
                                 }
                                 return;
                             }
+
                             const chunk = decoder.decode(value, { stream: true });
                             result += chunk;
                             agentChatDiv.innerHTML += chunk.replace(/\n/g, "<br>");
+                            scrollToBottom();   // ✅ keep scrolling while streaming
                             read();
                         });
                     }
                     read();
                 }).catch(error => {
                     $('#chat-box').append('<div class="message bot">❌ Error: ' + error.message + '</div>');
+                    scrollToBottom();  // ✅ make sure error is visible
                 }).finally(() => {
-                    $('#chat-box').scrollTop($('#chat-box')[0].scrollHeight);
                     $('#loader').hide();
                 });
             }

@@ -8,7 +8,14 @@
         <link rel="stylesheet" href="{% static 'css/styles.css' %}">
     </head>
     <body>
-        <div class="main-container">
+        <div class="menublock">
+            <ul>
+                <li><a href="/">Chatbot</a></li>
+                <li><a href="/chathistory/">Chat History</a></li>
+                <li class="active"><a href="/document/">Manage Document</a></li>
+            </ul>
+        </div>
+        <div class="main-container" style="height: calc(100vh - 150px);">
             <!-- Sidebar with MetaData and Document Upload -->
             <div class="sidebar" style="display: flex;flex-direction: column;gap: 10px;max-width: 700px;width: 100%;margin: auto;">
                 <!-- Document Upload Section -->

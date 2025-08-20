@@ -9,6 +9,8 @@ class ChatSession(models.Model):
     """Model to store chat sessions"""
     session_id = models.CharField(max_length=100, unique=True, db_index=True)
     run_id = models.CharField(max_length=100, blank=True, db_index=True)  # Track conversation runs
+    user_name = models.CharField(max_length=100, blank=True, null=True)  # Store validated user name
+    name_validated = models.BooleanField(default=False)  # Track name validation status
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     is_active = models.BooleanField(default=True)
@@ -56,4 +58,4 @@ class ChatMessage(models.Model):
         ]
     
     #def __str__(self):
-     #   return f"{self.message_type}: {self.content[:50]}..."
+        #return f"{self.message_type}: {self.content[:50]}..."

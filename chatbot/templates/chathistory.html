@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        {% load static %}
+        <meta charset="UTF-8">
+        <title>Chat with Bot</title>
+        <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+        <link rel="stylesheet" href="{% static 'css/styles.css' %}">
+    </head>
+    <body>
+        <div class="menublock">
+            <ul>
+                <li><a href="/">Chatbot</a></li>
+                <li class="active"><a href="/chathistory/">Chat History</a></li>
+                <li><a href="/document/">Manage Document</a></li>
+            </ul>
+        </div>
+        <div class="main-container" style="height: calc(100vh - 150px);">
+            
+            <!-- MetaData Container -->
+            <div class="metadata-comtainer" id="metadata_comtainer">
+                <div class="chat-header">
+                    All Session
+                </div>
+                <div class="metadata" style="overflow: auto;padding: 0px;">
+                    <ul>
+                        {% for s in sessions %}
+                            <li class="chatsession {% if s.session_id == last_session_id %}active{% endif %}" id="{{ s.session_id }}">{{ s.session_id }}<br/>
+                                {{ s.created_at }}
+                            </li>
+                        {% empty %}
+                            <li>No sessions.</li>
+                        {% endfor %}
+                    </ul>
+
+                </div>
+            </div>
+            <!-- Chat Section -->
+            <div class="chat-section">
+                <div class="chat-container"> 
+                    <div class="chat-header">
+                        Chat History
+                    </div>
+                    <div class="chat-box" id="chat-box">
+                        {% for msg in messages %}
+                            <div class="message {% if msg.message_type == 'human' %}user{% else %}bot{% endif %}">
+                                <strong>{{ msg.message_type|title }}:</strong>
+                                {{ msg.content|linebreaksbr }}<br/>
+                                <small style="opacity:.6;">{{ msg.created_at }}</small>
+                            </div>
+                        {% empty %}
+                            <div class="message">No messages in this session.</div>
+                        {% endfor %}
+                    </div>                    
+                </div>
+            </div>
+        </div>
+        <script>
+            $(document).ready(function() {
+                $(".chatsession").on("click", function() {
+                    let sessionId = $(this).attr("id");
+
+                    // Remove active class from all and add to clicked
+                    $(".chatsession").removeClass("active");
+                    $(this).addClass("active");
+
+                    // AJAX request to load chat history
+                    $.ajax({
+                        url: "/chathistory/load/",   // Django view URL
+                        type: "GET",
+                        data: {
+                            session_id: sessionId
+                        },
+                        success: function(response) {
+                            // Replace chat-box content
+                            $("#chat-box").html(response);
+                        },
+                        error: function(xhr) {
+                            alert("Error loading chat history.");
+                        }
+                    });
+                });
+            });
+            </script>
+    </body>
+</html>
