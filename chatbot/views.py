@@ -12,6 +12,7 @@ import os,re
 from dotenv import load_dotenv
 import uuid
 from django.http import StreamingHttpResponse
+from urllib.parse import urljoin, urlparse
 
 # Database models
 from .models import ChatSession, ChatMessage
@@ -25,6 +26,9 @@ from langchain.schema import SystemMessage, AIMessage
 from langchain_core.messages import ToolMessage,HumanMessage,AIMessageChunk
 from langchain.tools import tool
 from openai import OpenAIError, APITimeoutError
+from langchain_community.document_loaders import WebBaseLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+
 
 # =============================
 # Global Variables & Config
@@ -43,7 +47,7 @@ MODEL = "gpt-3.5-turbo"
 user_name_status = {}  # session_id -> {'name_validated': bool, 'name': str}
 
 # System message prompt for chatbot behavior
-system_message = """You are an expert SEO assistant with name validation capabilities.
+system_message = """You are an expert SEO assistant with name validation and advanced URL analysis capabilities.
 
     IMPORTANT INSTRUCTIONS:
     1. FIRST INTERACTION: Always start by asking the user for their name in a friendly way.
@@ -61,19 +65,77 @@ system_message = """You are an expert SEO assistant with name validation capabil
     - Search ranking analysis
     - Competitor analysis
     - Document content analysis for SEO insights
+    - Comprehensive URL analysis and parsing
+
+    URL Analysis Tools Available:
+    - validate_and_fetch_url: Basic URL validation with quick SEO insights
+    - extract_metadata: Complete metadata extraction (title, description, Open Graph, etc.)
+    - fetch_content: Content extraction and analysis using LangChain
+    - extract_headings: Full heading structure analysis (H1-H6)
+    - extract_faqs: FAQ and Q&A content extraction
+    - extract_main_content: Comprehensive SEO content analysis
 
     Guidelines:
     1. Always start by collecting the user's name using a warm, friendly approach.
     2. Use the validate_name tool when they provide their name.
     3. After name validation, provide your full SEO services.
     4. Only answer SEO-related questions in detail AFTER name is validated.
-    5. If the user asks a question unrelated to SEO, politely say you specialize in SEO and cannot answer other topics.
-    6. If the user clearly asks for a basic arithmetic calculation (e.g., multiplication, addition, subtraction, division), call the appropriate calculation tool.
-    7. If the user provides or asks to validate a URL, call the `validate_and_fetch_url` tool to check its validity and fetch its title.
-    8. You can analyze uploaded documents for SEO-related insights when asked.
-    9. Always provide actionable, practical SEO recommendations with clear steps.
-    10. If user sends any message before providing a valid name, remind them to share their name first.
+    5. When users provide URLs, choose the most appropriate analysis tool based on their needs
+    6. For basic validation: use validate_and_fetch_url
+    7. For detailed analysis: use extract_metadata, fetch_content, extract_headings, extract_faqs, or extract_main_content
+    8. If the user asks a question unrelated to SEO, politely say you specialize in SEO and cannot answer other topics.
+    9. If the user clearly asks for a basic arithmetic calculation, call the multiply tool.
+    10. You can analyze uploaded documents for SEO-related insights when asked.
+    11. Always provide actionable, practical SEO recommendations with clear steps.
+    12. If user sends any message before providing a valid name, remind them to share their name first.
     """
+
+# Welcome message prompt for chatbot behavior
+welcome_message = """Welcome to your Personal SEO Assistant!
+
+I'm here to help you dominate search rankings and grow your online presence! 
+
+I can assist you with:  
+- Keyword Research & Analysis  
+- Content Optimization Strategies  
+- Technical SEO Recommendations  
+- Meta Tag Optimization  
+- Link Building Strategies  
+- SEO Auditing & Reporting  
+- Search Ranking Analysis  
+- Competitor Analysis  
+- Advanced URL Analysis & Parsing
+
+NEW: Advanced URL Analysis Tools:
+- Complete metadata extraction
+- Content analysis with LangChain
+- Heading structure analysis
+- FAQ content extraction
+- Comprehensive SEO audits
+
+I can also help with:  
+- Basic calculations (just ask me to multiply numbers)  
+- URL validation and detailed analysis  
+- Document analysis for SEO insights
+
+But first, I'd love to know who I'm talking to. What's your name?  
+
+Once I know, I'll be able to provide:  
+- Personalized SEO Strategies  
+- Targeted Recommendations  
+- A clear roadmap to achieve your SEO goals  
+
+So please tell me your name, and let's start your SEO journey together!"""
+
+# This doesn't look like a name, ask for name first
+name_request_message = """🙏 **Please provide your name first!**
+
+I'd love to help you with your SEO needs, but I need to know who I'm talking to first. 
+
+**What's your name?** 
+
+Once you share your name, I'll be able to provide personalized SEO assistance, keyword research, content optimization strategies, and much more! 🚀✨"""
+
 
 # =============================
 # Custom Tool Functions
@@ -91,14 +153,510 @@ def multiply(a: float, b: float) -> float:
     chat_system = "Tool call - Multiply"
     return a * b
 
+@tool
+def extract_metadata(url: str) -> str:
+    """Extract comprehensive metadata from a URL including title, description, keywords, and Open Graph data.
+    Args:
+        url: The URL to extract metadata from
+    Returns:
+        JSON string containing extracted metadata
+    """
+    global chat_system
+    chat_system = "Tool call - Extract Metadata"
+    
+    if not validators.url(url):
+        return "❌ Invalid URL. Please enter a valid one (e.g., https://example.com)."
+    
+    try:
+        response = requests.get(url, timeout=15, headers={
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        })
+        response.raise_for_status()
+        
+        soup = BeautifulSoup(response.text, "html.parser")
+        
+        # Extract basic metadata
+        metadata = {
+            "url": url,
+            "title": "",
+            "description": "",
+            "keywords": "",
+            "author": "",
+            "canonical_url": "",
+            "language": "",
+            "open_graph": {},
+            "twitter_card": {},
+            "schema_org": [],
+            "meta_robots": "",
+            "charset": ""
+        }
+        
+        # Title
+        if soup.title:
+            metadata["title"] = soup.title.string.strip() if soup.title.string else ""
+        
+        # Meta tags
+        for meta in soup.find_all('meta'):
+            name = meta.get('name', '').lower()
+            property_attr = meta.get('property', '').lower()
+            content = meta.get('content', '')
+            
+            if name == 'description':
+                metadata["description"] = content
+            elif name == 'keywords':
+                metadata["keywords"] = content
+            elif name == 'author':
+                metadata["author"] = content
+            elif name == 'robots':
+                metadata["meta_robots"] = content
+            elif name == 'language' or name == 'lang':
+                metadata["language"] = content
+            elif meta.get('charset'):
+                metadata["charset"] = meta.get('charset')
+            elif meta.get('http-equiv', '').lower() == 'content-type':
+                metadata["charset"] = content
+            
+            # Open Graph
+            elif property_attr.startswith('og:'):
+                og_key = property_attr.replace('og:', '')
+                metadata["open_graph"][og_key] = content
+            
+            # Twitter Card
+            elif name.startswith('twitter:'):
+                twitter_key = name.replace('twitter:', '')
+                metadata["twitter_card"][twitter_key] = content
+        
+        # Canonical URL
+        canonical = soup.find('link', rel='canonical')
+        if canonical:
+            metadata["canonical_url"] = canonical.get('href', '')
+        
+        # Language from html tag
+        if not metadata["language"]:
+            html_tag = soup.find('html')
+            if html_tag:
+                metadata["language"] = html_tag.get('lang', '')
+        
+        # Schema.org structured data
+        for script in soup.find_all('script', type='application/ld+json'):
+            try:
+                schema_data = json.loads(script.string)
+                metadata["schema_org"].append(schema_data)
+            except (json.JSONDecodeError, AttributeError):
+                continue
+        
+        # Format response
+        result = f"✅ **Metadata extracted from: {url}**\n\n"
+        result += f"📄 **Title:** {metadata['title']}\n"
+        result += f"📝 **Description:** {metadata['description'][:200]}{'...' if len(metadata['description']) > 200 else ''}\n"
+        result += f"🏷️ **Keywords:** {metadata['keywords']}\n"
+        result += f"👤 **Author:** {metadata['author']}\n"
+        result += f"🌐 **Language:** {metadata['language']}\n"
+        result += f"🔗 **Canonical URL:** {metadata['canonical_url']}\n"
+        result += f"🤖 **Robots:** {metadata['meta_robots']}\n\n"
+        
+        if metadata["open_graph"]:
+            result += "📱 **Open Graph Data:**\n"
+            for key, value in metadata["open_graph"].items():
+                result += f"  • {key}: {value}\n"
+            result += "\n"
+        
+        if metadata["twitter_card"]:
+            result += "🐦 **Twitter Card Data:**\n"
+            for key, value in metadata["twitter_card"].items():
+                result += f"  • {key}: {value}\n"
+            result += "\n"
+        
+        if metadata["schema_org"]:
+            result += f"📋 **Schema.org:** {len(metadata['schema_org'])} structured data blocks found\n"
+        
+        return result
+        
+    except requests.exceptions.RequestException as e:
+        return f"⚠️ Error fetching URL content: {str(e)}"
+    except Exception as e:
+        return f"⚠️ Error parsing metadata: {str(e)}"
 
 @tool
-def validate_and_fetch_url(url: str) -> str:
-    """Validate a URL and fetch its title if valid.
+def fetch_content(url: str) -> str:
+    """Fetch and parse the main content from a URL using LangChain WebBaseLoader.
     Args:
-        url: The URL to validate and fetch title from
+        url: The URL to fetch content from
     Returns:
-        Validation result and title if successful
+        Extracted and cleaned content from the webpage
+    """
+    global chat_system
+    chat_system = "Tool call - Fetch Content"
+    
+    if not validators.url(url):
+        return "❌ Invalid URL. Please enter a valid one (e.g., https://example.com)."
+    
+    try:
+        # Use LangChain WebBaseLoader for content extraction
+        loader = WebBaseLoader(url)
+        documents = loader.load()
+        
+        if not documents:
+            return "⚠️ No content could be extracted from the URL."
+        
+        # Get the main content
+        content = documents[0].page_content
+        
+        # Split content for better handling
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1000,
+            chunk_overlap=300,
+            separators=["\n\n", "\n", ". ", " ", ""]
+        )
+        
+        # Get first chunk as summary
+        chunks = text_splitter.split_text(content)
+        main_content = chunks[0] if chunks else content[:2000]
+        
+        # Clean up the content
+        main_content = re.sub(r'\s+', ' ', main_content).strip()
+        
+        result = f"✅ **Content extracted from: {url}**\n\n"
+        result += f"📊 **Content Length:** {len(content)} characters\n"
+        result += f"📄 **Number of Chunks:** {len(chunks)}\n\n"
+        result += f"**Main Content Preview:**\n{main_content}..."
+        
+        if len(chunks) > 1:
+            result += f"\n\n💡 *This page has {len(chunks)} content sections. Use extract_main_content for full analysis.*"
+        
+        return result
+        
+    except Exception as e:
+        return f"⚠️ Error fetching content: {str(e)}"
+
+@tool
+def extract_headings(url: str) -> str:
+    """Extract all headings (H1-H6) from a URL for SEO analysis.
+    Args:
+        url: The URL to extract headings from
+    Returns:
+        Structured list of all headings with their hierarchy
+    """
+    global chat_system
+    chat_system = "Tool call - Extract Headings"
+    
+    if not validators.url(url):
+        return "❌ Invalid URL. Please enter a valid one (e.g., https://example.com)."
+    
+    try:
+        response = requests.get(url, timeout=15, headers={
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        })
+        response.raise_for_status()
+        
+        soup = BeautifulSoup(response.text, "html.parser")
+        
+        # Extract all headings
+        headings = []
+        heading_tags = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']
+        
+        for tag in heading_tags:
+            for heading in soup.find_all(tag):
+                text = heading.get_text().strip()
+                if text:  # Only include non-empty headings
+                    headings.append({
+                        'level': int(tag[1]),  # Extract number from h1, h2, etc.
+                        'text': text,
+                        'tag': tag.upper()
+                    })
+        
+        if not headings:
+            return f"⚠️ No headings found on {url}"
+        
+        result = f"✅ **Headings extracted from: {url}**\n\n"
+        result += f"📊 **Total Headings:** {len(headings)}\n\n"
+        
+        # Group by heading level for SEO analysis
+        heading_counts = {}
+        for heading in headings:
+            level = heading['level']
+            heading_counts[level] = heading_counts.get(level, 0) + 1
+        
+        result += "**Heading Structure:**\n"
+        for level in sorted(heading_counts.keys()):
+            result += f"• H{level}: {heading_counts[level]} headings\n"
+        
+        result += "\n**All Headings:**\n"
+        for heading in headings:
+            indent = "  " * (heading['level'] - 1)
+            result += f"{indent}• **{heading['tag']}:** {heading['text']}\n"
+        
+        # SEO recommendations
+        result += "\n**SEO Analysis:**\n"
+        h1_count = heading_counts.get(1, 0)
+        if h1_count == 0:
+            result += "⚠️ No H1 tag found - add one for better SEO\n"
+        elif h1_count > 1:
+            result += f"⚠️ Multiple H1 tags ({h1_count}) found - consider using only one\n"
+        else:
+            result += "✅ Good H1 structure (1 H1 tag found)\n"
+        
+        if heading_counts.get(2, 0) == 0:
+            result += "💡 Consider adding H2 tags for better content structure\n"
+        
+        return result
+        
+    except requests.exceptions.RequestException as e:
+        return f"⚠️ Error fetching URL: {str(e)}"
+    except Exception as e:
+        return f"⚠️ Error extracting headings: {str(e)}"
+
+@tool
+def extract_faqs(url: str) -> str:
+    """Extract FAQ sections and Q&A content from a URL for SEO analysis.
+    Args:
+        url: The URL to extract FAQs from
+    Returns:
+        Extracted FAQ content and structured data
+    """
+    global chat_system
+    chat_system = "Tool call - Extract FAQs"
+    
+    if not validators.url(url):
+        return "❌ Invalid URL. Please enter a valid one (e.g., https://example.com)."
+    
+    try:
+        response = requests.get(url, timeout=15, headers={
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        })
+        response.raise_for_status()
+        
+        soup = BeautifulSoup(response.text, "html.parser")
+        
+        faqs = []
+        
+        # Look for FAQ structured data (Schema.org)
+        for script in soup.find_all('script', type='application/ld+json'):
+            try:
+                data = json.loads(script.string)
+                if isinstance(data, dict):
+                    if data.get('@type') == 'FAQPage':
+                        main_entity = data.get('mainEntity', [])
+                        if isinstance(main_entity, list):
+                            for item in main_entity:
+                                if item.get('@type') == 'Question':
+                                    question = item.get('name', '')
+                                    answer = ''
+                                    accepted_answer = item.get('acceptedAnswer', {})
+                                    if isinstance(accepted_answer, dict):
+                                        answer = accepted_answer.get('text', '')
+                                    faqs.append({
+                                        'question': question,
+                                        'answer': answer,
+                                        'source': 'Schema.org FAQ'
+                                    })
+                elif isinstance(data, list):
+                    for item in data:
+                        if isinstance(item, dict) and item.get('@type') == 'Question':
+                            question = item.get('name', '')
+                            answer = ''
+                            accepted_answer = item.get('acceptedAnswer', {})
+                            if isinstance(accepted_answer, dict):
+                                answer = accepted_answer.get('text', '')
+                            faqs.append({
+                                'question': question,
+                                'answer': answer,
+                                'source': 'Schema.org FAQ'
+                            })
+            except (json.JSONDecodeError, AttributeError):
+                continue
+        
+        # Look for common FAQ patterns in HTML
+        faq_patterns = [
+            {'question_selector': 'dt', 'answer_selector': 'dd'},
+            {'question_selector': '.faq-question', 'answer_selector': '.faq-answer'},
+            {'question_selector': '.question', 'answer_selector': '.answer'},
+            {'question_selector': 'h3', 'answer_selector': 'p'}
+        ]
+        
+        for pattern in faq_patterns:
+            questions = soup.find_all(class_=re.compile(pattern['question_selector'].replace('.', '').replace('class_', ''), re.I))
+            if not questions:
+                questions = soup.find_all(pattern['question_selector'].replace('.', ''))
+            
+            for question_elem in questions:
+                question_text = question_elem.get_text().strip()
+                if '?' in question_text and len(question_text) > 10:
+                    # Find corresponding answer
+                    answer_elem = question_elem.find_next_sibling()
+                    answer_text = ''
+                    if answer_elem:
+                        answer_text = answer_elem.get_text().strip()
+                    
+                    # Avoid duplicates
+                    if not any(faq['question'] == question_text for faq in faqs):
+                        faqs.append({
+                            'question': question_text,
+                            'answer': answer_text,
+                            'source': 'HTML Pattern'
+                        })
+        
+        if not faqs:
+            return f"⚠️ No FAQ content found on {url}"
+        
+        result = f"✅ **FAQ content extracted from: {url}**\n\n"
+        result += f"📊 **Total FAQs Found:** {len(faqs)}\n\n"
+        
+        # Group by source
+        schema_faqs = [faq for faq in faqs if faq['source'] == 'Schema.org FAQ']
+        html_faqs = [faq for faq in faqs if faq['source'] == 'HTML Pattern']
+        
+        if schema_faqs:
+            result += f"🏷️ **Structured Data FAQs ({len(schema_faqs)}):**\n"
+            for i, faq in enumerate(schema_faqs, 1):
+                result += f"\n**Q{i}:** {faq['question']}\n"
+                result += f"**A:** {faq['answer'][:200]}{'...' if len(faq['answer']) > 200 else ''}\n"
+        
+        if html_faqs:
+            result += f"\n📄 **HTML Pattern FAQs ({len(html_faqs)}):**\n"
+            for i, faq in enumerate(html_faqs, 1):
+                result += f"\n**Q{i}:** {faq['question']}\n"
+                if faq['answer']:
+                    result += f"**A:** {faq['answer'][:200]}{'...' if len(faq['answer']) > 200 else ''}\n"
+        
+        # SEO recommendations
+        result += "\n**SEO Analysis:**\n"
+        if schema_faqs:
+            result += "✅ FAQ structured data found - excellent for rich snippets!\n"
+        else:
+            result += "💡 Consider adding FAQ structured data (Schema.org) for rich snippets\n"
+        
+        if len(faqs) >= 5:
+            result += "✅ Good FAQ content volume for SEO\n"
+        else:
+            result += "💡 Consider adding more FAQ content for better SEO coverage\n"
+        
+        return result
+        
+    except requests.exceptions.RequestException as e:
+        return f"⚠️ Error fetching URL: {str(e)}"
+    except Exception as e:
+        return f"⚠️ Error extracting FAQs: {str(e)}"
+
+@tool
+def extract_main_content(url: str) -> str:
+    """Extract and analyze the main content from a URL for comprehensive SEO insights.
+    Args:
+        url: The URL to analyze
+    Returns:
+        Comprehensive content analysis including word count, readability, and SEO metrics
+    """
+    global chat_system
+    chat_system = "Tool call - Extract Main Content"
+    
+    if not validators.url(url):
+        return "❌ Invalid URL. Please enter a valid one (e.g., https://example.com)."
+    
+    try:
+        # Use LangChain WebBaseLoader
+        loader = WebBaseLoader(url)
+        documents = loader.load()
+        
+        if not documents:
+            return "⚠️ No content could be extracted from the URL."
+        
+        content = documents[0].page_content
+        
+        # Also get raw HTML for additional analysis
+        response = requests.get(url, timeout=15, headers={
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        })
+        soup = BeautifulSoup(response.text, "html.parser")
+        
+        # Content analysis
+        word_count = len(content.split())
+        char_count = len(content)
+        sentence_count = len([s for s in content.split('.') if s.strip()])
+        paragraph_count = len([p for p in content.split('\n\n') if p.strip()])
+        
+        # Extract images
+        images = soup.find_all('img')
+        img_with_alt = [img for img in images if img.get('alt')]
+        img_without_alt = [img for img in images if not img.get('alt')]
+        
+        # Extract links
+        internal_links = []
+        external_links = []
+        base_domain = urlparse(url).netloc
+        
+        for link in soup.find_all('a', href=True):
+            href = link['href']
+            if href.startswith('http'):
+                link_domain = urlparse(href).netloc
+                if link_domain == base_domain:
+                    internal_links.append(href)
+                else:
+                    external_links.append(href)
+            elif href.startswith('/'):
+                internal_links.append(urljoin(url, href))
+        
+        # Basic readability (simple metric)
+        avg_words_per_sentence = word_count / max(sentence_count, 1)
+        
+        result = f"✅ **Comprehensive content analysis for: {url}**\n\n"
+        result += "📊 **Content Metrics:**\n"
+        result += f"• Word count: {word_count}\n"
+        result += f"• Character count: {char_count}\n"
+        result += f"• Sentences: {sentence_count}\n"
+        result += f"• Paragraphs: {paragraph_count}\n"
+        result += f"• Average words per sentence: {avg_words_per_sentence:.1f}\n\n"
+        
+        result += "🖼️ **Image Analysis:**\n"
+        result += f"• Total images: {len(images)}\n"
+        result += f"• Images with alt text: {len(img_with_alt)}\n"
+        result += f"• Images missing alt text: {len(img_without_alt)}\n\n"
+        
+        result += "🔗 **Link Analysis:**\n"
+        result += f"• Internal links: {len(internal_links)}\n"
+        result += f"• External links: {len(external_links)}\n\n"
+        
+        # SEO recommendations
+        result += "🎯 **SEO Recommendations:**\n"
+        if word_count < 300:
+            result += "⚠️ Content is quite short - consider expanding (300+ words recommended)\n"
+        elif word_count > 1500:
+            result += "✅ Good content length for SEO\n"
+        else:
+            result += "✅ Decent content length\n"
+        
+        if len(img_without_alt) > 0:
+            result += f"⚠️ {len(img_without_alt)} images missing alt text\n"
+        else:
+            result += "✅ All images have alt text\n"
+        
+        if avg_words_per_sentence > 20:
+            result += "💡 Consider shorter sentences for better readability\n"
+        else:
+            result += "✅ Good sentence length for readability\n"
+        
+        if len(internal_links) < 3:
+            result += "💡 Consider adding more internal links for better site structure\n"
+        else:
+            result += "✅ Good internal linking structure\n"
+        
+        # Content preview
+        result += f"\n📄 **Content Preview:**\n{content[:500]}..."
+        
+        return result
+        
+    except requests.exceptions.RequestException as e:
+        return f"⚠️ Error fetching URL: {str(e)}"
+    except Exception as e:
+        return f"⚠️ Error analyzing content: {str(e)}"
+
+        
+@tool
+def validate_and_fetch_url(url: str) -> str:
+    """Enhanced URL validation with basic SEO information.
+    Args:
+        url: The URL to validate and fetch basic info from
+    Returns:
+        Validation result with title, description, and quick SEO insights
     """
     global chat_system
     chat_system = "Tool call - URL Validation"
@@ -107,13 +665,52 @@ def validate_and_fetch_url(url: str) -> str:
         return "❌ Invalid URL. Please enter a valid one (e.g., https://example.com)."
     
     try:
-        response = requests.get(url, timeout=10)
+        response = requests.get(url, timeout=10, headers={
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        })
         response.raise_for_status()
 
         soup = BeautifulSoup(response.text, "html.parser")
+        
+        # Basic info
         title = soup.title.string.strip() if soup.title and soup.title.string else "No title found"
         
-        return f"✅ URL is valid.\nTitle: {title}"
+        # Meta description
+        description = ""
+        desc_meta = soup.find('meta', attrs={'name': 'description'})
+        if desc_meta:
+            description = desc_meta.get('content', '')
+        
+        # Quick SEO checks
+        h1_tags = soup.find_all('h1')
+        meta_robots = soup.find('meta', attrs={'name': 'robots'})
+        robots_content = meta_robots.get('content', '') if meta_robots else ''
+        
+        result = f"✅ **URL is valid and accessible**\n\n"
+        result += f"🌐 **URL:** {url}\n"
+        result += f"📄 **Title:** {title}\n"
+        result += f"📝 **Description:** {description[:200]}{'...' if len(description) > 200 else ''}\n"
+        result += f"🏷️ **H1 Tags:** {len(h1_tags)} found\n"
+        result += f"🤖 **Robots:** {robots_content if robots_content else 'Not specified'}\n\n"
+        
+        # Quick SEO insights
+        result += "⚡ **Quick SEO Insights:**\n"
+        if len(title) < 30:
+            result += "• Title might be too short\n"
+        elif len(title) > 60:
+            result += "• Title might be too long for search results\n"
+        else:
+            result += "• Title length looks good\n"
+        
+        if not description:
+            result += "• Meta description is missing\n"
+        elif len(description) > 160:
+            result += "• Meta description might be too long\n"
+        else:
+            result += "• Meta description present\n"
+        
+        return result
+        
     except requests.exceptions.RequestException as e:
         return f"⚠️ URL validation passed, but content fetch failed.\nError: {str(e)}"
 
@@ -266,34 +863,6 @@ def generate_name_request_stream(session_id):
     if session_id not in user_name_status:
         user_name_status[session_id] = {'name_validated': False, 'name': ''}
     
-    welcome_message = """👋 **Welcome to your Personal SEO Assistant!**
-
-I'm here to help you dominate search rankings and grow your online presence! 🚀  
-
-I can assist you with:  
-🔍 **Keyword Research & Analysis**  
-📊 **Content Optimization Strategies**  
-🔧 **Technical SEO Recommendations**  
-🏷️ **Meta Tag Optimization**  
-🔗 **Link Building Strategies**  
-📈 **SEO Auditing & Reporting**  
-🎯 **Search Ranking Analysis**  
-🕵️ **Competitor Analysis**  
-
-I can also help with:  
-- Basic calculations (just ask me to multiply numbers)  
-- URL validation and title fetching  
-- Document analysis for SEO insights
-
-But first, I'd love to know who I'm talking to. **What's your name?**  
-
-Once I know, I'll be able to provide:  
-✨ **Personalized SEO Strategies**  
-✨ **Targeted Recommendations**  
-✨ **A clear roadmap to achieve your SEO goals**  
-
-So please tell me your name, and let's start your SEO journey together! 🚀✨"""
-
     try:
         run_id = generate_run_id()
         count = 0
@@ -370,7 +939,7 @@ So please tell me your name, and let's start your SEO journey together! 🚀✨"
             'run_id': run_id
         })
         
-        session, created = get_or_create_chat_session(session_id, run_id)
+        session, created = get_or_create_chat_session(session_id, run_id, None, False, 'welcome_message')
         save_message_to_db(session, messagedata, run_id, count)
         
     except Exception as e:
@@ -409,7 +978,7 @@ def chatbot_input(request):
         )
 
         # Tools available
-        tools = [multiply, validate_and_fetch_url, validate_name, check_name_requirement]
+        tools = [multiply, validate_and_fetch_url, validate_name, check_name_requirement, extract_metadata, fetch_content, extract_headings, extract_faqs, extract_main_content]
 
         llm = ChatOpenAI(
             temperature=0.7,
@@ -457,14 +1026,6 @@ def chatbot_input(request):
                 messages.append(HumanMessage(content=validation_instruction))
                 
             else:
-                # This doesn't look like a name, ask for name first
-                name_request_message = """🙏 **Please provide your name first!**
-
-I'd love to help you with your SEO needs, but I need to know who I'm talking to first. 
-
-**What's your name?** 
-
-Once you share your name, I'll be able to provide personalized SEO assistance, keyword research, content optimization strategies, and much more! 🚀✨"""
                 
                 # Add user message to history
                 chat_history[session_id].append(HumanMessage(content=usermessage))
@@ -502,7 +1063,7 @@ Once you share your name, I'll be able to provide personalized SEO assistance, k
                 })
 
                 # Save to database
-                session, created = get_or_create_chat_session(session_id, runid)
+                session, created = get_or_create_chat_session(session_id, runid, None, False, chat_system)
                 save_message_to_db(session, messagedata, runid, count)
                 
                 return StreamingHttpResponse(
@@ -555,7 +1116,12 @@ Once you share your name, I'll be able to provide personalized SEO assistance, k
                 "multiply": multiply,
                 "validate_and_fetch_url": validate_and_fetch_url,
                 "validate_name": validate_name,
-                "check_name_requirement": check_name_requirement
+                "check_name_requirement": check_name_requirement,
+                "extract_metadata": extract_metadata,
+                "fetch_content": fetch_content,
+                "extract_headings": extract_headings,
+                "extract_faqs": extract_faqs,
+                "extract_main_content": extract_main_content
             }
 
             for tool_call in ai_msg.tool_calls:
@@ -639,7 +1205,7 @@ Once you share your name, I'll be able to provide personalized SEO assistance, k
             chat_history[session_id].extend(messages[len(chat_history[session_id]):])
             
             return StreamingHttpResponse(
-                build_stream_response(llm_with_tools, messages, ai_msg, session_id, chat_system, count),
+                build_stream_response(llm_with_tools, messages, ai_msg, session_id, chat_system, count,usermessage),
                 content_type='text/plain'
             )
 
@@ -648,7 +1214,7 @@ Once you share your name, I'll be able to provide personalized SEO assistance, k
             chat_history[session_id].append(HumanMessage(content=usermessage))
             
             return StreamingHttpResponse(
-                build_stream_response(llm_with_tools, messages, ai_msg, session_id, chat_system, count),
+                build_stream_response(llm_with_tools, messages, ai_msg, session_id, chat_system, count,usermessage),
                 content_type='text/plain'
             )
 
@@ -674,7 +1240,7 @@ def stream_static_message(message):
         if word.endswith('\n') or word.endswith('**') or word.endswith('!'):
             time.sleep(0.1)
     
-def build_stream_response(llm_with_tools, messages, ai_msg, session_id, chat_system, count):
+def build_stream_response(llm_with_tools, messages, ai_msg, session_id, chat_system, count,usermessage):
     """Unified streaming response generator with token usage tracking"""
     try:
         final_response_content = ""
@@ -712,7 +1278,15 @@ def build_stream_response(llm_with_tools, messages, ai_msg, session_id, chat_sys
                 'source': chat_system,
                 'run_id': run_id
             })
-            session, create = get_or_create_chat_session(session_id, run_id)
+
+            if chat_system == "Tool call - Name Validation": 
+
+                first_name = extract_name(final_response_content)
+
+                
+                session, create = get_or_create_chat_session(session_id, run_id, first_name, True,chat_system)
+            else:
+                session, create = get_or_create_chat_session(session_id, run_id,None,False,chat_system)
 
             messagedata[session_id].append({
                 "message_type": "ai",
@@ -738,13 +1312,16 @@ def build_stream_response(llm_with_tools, messages, ai_msg, session_id, chat_sys
 # =============================
 # Database Helpers
 # =============================
-def get_or_create_chat_session(session_id, run_id=None):
+def get_or_create_chat_session(session_id, run_id=None, user_name=None, name_validated=False , chat_system='welcome_message'):
     """Get existing chat session or create new one"""
     try:
+
         session, created = ChatSession.objects.get_or_create(
             session_id=session_id,
             defaults={
                 'run_id': run_id,
+                'user_name': user_name,
+                'name_validated': name_validated,
                 'is_active': True
             }
         )
@@ -752,7 +1329,13 @@ def get_or_create_chat_session(session_id, run_id=None):
         # Update run_id if provided and different
         if run_id and session.run_id != run_id:
             session.run_id = run_id
-            session.save(update_fields=['run_id', 'updated_at'])
+            if chat_system == "Tool call - Name Validation": 
+            
+                session.user_name = user_name
+                session.name_validated=name_validated
+                session.save(update_fields=['run_id','user_name','updated_at','name_validated',])
+            else:
+                session.save(update_fields=['run_id','updated_at'])
             
         return session, created
     except Exception as e:
@@ -821,6 +1404,23 @@ def save_message_to_db(session, messagedata, run_id=None, count=0):
 def generate_message_id():
     """Generate a unique message ID"""
     return f"msg--{uuid.uuid4().hex[:8]}-{uuid.uuid4().hex[:4]}-{uuid.uuid4().hex[:4]}-{uuid.uuid4().hex[:4]}-{uuid.uuid4().hex[:12]}"
+
+def extract_name(message: str) -> str:
+    # Case 1: after comma and before ! or ?
+    m = re.search(r",\s*([^!?]+)[!?]", message)
+    if m:
+        return m.group(1).strip(" '")
+
+    # Case 2: after greeting (Hello, Hi, etc.) before ! or ?
+    m = re.search(
+        r"\b(?:Hello|Hi|Hey|Welcome|Great to meet you|Nice to meet you)[,\s]+([^!?]+)[!?]", 
+        message, re.IGNORECASE
+    )
+    if m:
+        return m.group(1).strip(" '")
+
+    # Case 3: fallback → first word
+    return message.strip().split()[0].strip(" '")
 
 def generate_run_id():
     """Generate a unique run ID for conversation tracking"""
