@@ -29,6 +29,8 @@ from openai import OpenAIError, APITimeoutError
 from langchain_community.document_loaders import WebBaseLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 
+from .complete_seo_tools import validate_seo_against_document, comprehensive_seo_analysis
+
 
 # =============================
 # Global Variables & Config
@@ -47,7 +49,7 @@ MODEL = "gpt-3.5-turbo"
 user_name_status = {}  # session_id -> {'name_validated': bool, 'name': str}
 
 # System message prompt for chatbot behavior
-system_message = """You are an expert SEO assistant with name validation and advanced URL analysis capabilities.
+system_message = system_message = """You are an expert SEO assistant with name validation and advanced URL analysis capabilities.
 
     IMPORTANT INSTRUCTIONS:
     1. FIRST INTERACTION: Always start by asking the user for their name in a friendly way.
@@ -74,6 +76,13 @@ system_message = """You are an expert SEO assistant with name validation and adv
     - extract_headings: Full heading structure analysis (H1-H6)
     - extract_faqs: FAQ and Q&A content extraction
     - extract_main_content: Comprehensive SEO content analysis
+    - comprehensive_seo_analysis: Complete SEO analysis including all aspects
+    - validate_seo_against_document: Validate URL's SEO against uploaded documents
+
+    Document Integration:
+    - When users mention comparing with documents or validating against content, use validate_seo_against_document
+    - This tool can compare URL SEO elements against uploaded documents
+    - Helps identify content alignment and optimization opportunities
 
     Guidelines:
     1. Always start by collecting the user's name using a warm, friendly approach.
@@ -81,13 +90,15 @@ system_message = """You are an expert SEO assistant with name validation and adv
     3. After name validation, provide your full SEO services.
     4. Only answer SEO-related questions in detail AFTER name is validated.
     5. When users provide URLs, choose the most appropriate analysis tool based on their needs
-    6. For basic validation: use validate_and_fetch_url
-    7. For detailed analysis: use extract_metadata, fetch_content, extract_headings, extract_faqs, or extract_main_content
-    8. If the user asks a question unrelated to SEO, politely say you specialize in SEO and cannot answer other topics.
-    9. If the user clearly asks for a basic arithmetic calculation, call the multiply tool.
-    10. You can analyze uploaded documents for SEO-related insights when asked.
-    11. Always provide actionable, practical SEO recommendations with clear steps.
-    12. If user sends any message before providing a valid name, remind them to share their name first.
+    6. For comprehensive analysis: use comprehensive_seo_analysis
+    7. For document comparison: use validate_seo_against_document
+    8. For basic validation: use validate_and_fetch_url
+    9. For specific aspects: use extract_metadata, fetch_content, extract_headings, extract_faqs, or extract_main_content
+    10. If the user asks a question unrelated to SEO, politely say you specialize in SEO and cannot answer other topics.
+    11. If the user clearly asks for a basic arithmetic calculation, call the multiply tool.
+    12. You can analyze uploaded documents for SEO-related insights when asked.
+    13. Always provide actionable, practical SEO recommendations with clear steps.
+    14. If user sends any message before providing a valid name, remind them to share their name first.
     """
 
 # Welcome message prompt for chatbot behavior
@@ -105,18 +116,21 @@ I can assist you with:
 - Search Ranking Analysis  
 - Competitor Analysis  
 - Advanced URL Analysis & Parsing
+- Document Comparison & Validation
 
-NEW: Advanced URL Analysis Tools:
+NEW: Advanced SEO Analysis Tools:
 - Complete metadata extraction
 - Content analysis with LangChain
 - Heading structure analysis
 - FAQ content extraction
 - Comprehensive SEO audits
+- Document comparison and validation
 
 I can also help with:  
 - Basic calculations (just ask me to multiply numbers)  
 - URL validation and detailed analysis  
 - Document analysis for SEO insights
+- Comparing website SEO against your documents
 
 But first, I'd love to know who I'm talking to. What's your name?  
 
@@ -823,17 +837,39 @@ count = 0
 # Token Usage View
 # =============================
 def get_token_usage_view(request, run_id):
-    token_usage = tokenresponse[run_id]
-    return JsonResponse({
-        'response_type': token_usage['response_type'],
-        'tools_used': token_usage['tools_used'],
-        'source': token_usage['source'],
-        'session': run_id,
-        'run_id': token_usage['run_id'],
-        'input_tokens': token_usage['input_tokens'],
-        'output_tokens': token_usage['output_tokens'],
-        'total_tokens': token_usage['total_tokens']
-    })
+    """Fixed version with proper error handling"""
+    try:
+        # Check if run_id exists in tokenresponse
+        if run_id not in tokenresponse:
+            return JsonResponse({
+                'success': False,
+                'error': f'Run ID {run_id} not found',
+                'available_runs': list(tokenresponse.keys())
+            })
+        
+        token_usage = tokenresponse[run_id]
+        
+        # Provide defaults for missing keys
+        response_data = {
+            'response_type': token_usage.get('response_type', 'unknown'),
+            'tools_used': token_usage.get('tools_used', False),
+            'source': token_usage.get('source', 'system'),
+            'session': run_id,
+            'run_id': token_usage.get('run_id', run_id),
+            'input_tokens': token_usage.get('input_tokens', 0),
+            'output_tokens': token_usage.get('output_tokens', 0),
+            'total_tokens': token_usage.get('total_tokens', 0),
+            'success': True
+        }
+        
+        return JsonResponse(response_data)
+        
+    except Exception as e:
+        return JsonResponse({
+            'success': False,
+            'error': f'Error retrieving token usage: {str(e)}',
+            'run_id': run_id
+        })
 
 # =============================
 # Streaming Welcome Message
@@ -928,6 +964,9 @@ def generate_name_request_stream(session_id):
             "total_tokens": token_count
         })
         
+        # Initialize if not exists
+        if session_id not in tokenresponse:
+            tokenresponse[session_id] = {}
         # Save to database
         tokenresponse[session_id].update({
             'total_tokens': token_count,
@@ -978,7 +1017,8 @@ def chatbot_input(request):
         )
 
         # Tools available
-        tools = [multiply, validate_and_fetch_url, validate_name, check_name_requirement, extract_metadata, fetch_content, extract_headings, extract_faqs, extract_main_content]
+        tools = [multiply, validate_and_fetch_url, validate_name, check_name_requirement, extract_metadata, fetch_content, extract_headings, extract_faqs, extract_main_content,validate_seo_against_document,
+        comprehensive_seo_analysis]
 
         llm = ChatOpenAI(
             temperature=0.7,
@@ -1031,7 +1071,7 @@ def chatbot_input(request):
                 chat_history[session_id].append(HumanMessage(content=usermessage))
                 chat_history[session_id].append(AIMessage(content=name_request_message))
                 
-                # Store message data
+                # Store message data with proper structure
                 messagedata[session_id].append({
                     "message_type": "human",
                     "content": usermessage,
@@ -1039,12 +1079,12 @@ def chatbot_input(request):
                     "tool_calls": '',
                     "tool_call_id": '',
                     "count": count,
-                    "response_type": '',
-                    "tools_used": '',
-                    "source": '',
-                    "input_tokens": 0,
+                    "response_type": 'user_input',  # Add this
+                    "tools_used": False,  # Add this
+                    "source": 'user',  # Add this
+                    "input_tokens": len(usermessage.split()),  # Add this
                     "output_tokens": 0,
-                    "total_tokens": 0
+                    "total_tokens": len(usermessage.split())
                 })
 
                 messagedata[session_id].append({
@@ -1061,6 +1101,22 @@ def chatbot_input(request):
                     "output_tokens": len(name_request_message.split()),
                     "total_tokens": len(name_request_message.split())
                 })
+
+                # IMPORTANT: Initialize tokenresponse properly
+                if session_id not in tokenresponse:
+                    tokenresponse[session_id] = {}
+                
+                # Save to tokenresponse with all required keys
+                tokenresponse[session_id].update({
+                    'total_tokens': len(name_request_message.split()),
+                    'input_tokens': len(usermessage.split()),
+                    'output_tokens': len(name_request_message.split()),
+                    'response_type': 'name_request',  # This key was missing!
+                    'tools_used': False,
+                    'source': 'system',
+                    'run_id': runid
+                })
+
 
                 # Save to database
                 session, created = get_or_create_chat_session(session_id, runid, None, False, chat_system)
@@ -1121,7 +1177,9 @@ def chatbot_input(request):
                 "fetch_content": fetch_content,
                 "extract_headings": extract_headings,
                 "extract_faqs": extract_faqs,
-                "extract_main_content": extract_main_content
+                "extract_main_content": extract_main_content,
+                "validate_seo_against_document": validate_seo_against_document,
+                "comprehensive_seo_analysis": comprehensive_seo_analysis
             }
 
             for tool_call in ai_msg.tool_calls:
@@ -1269,11 +1327,16 @@ def build_stream_response(llm_with_tools, messages, ai_msg, session_id, chat_sys
             response_type = 'Tool Usage' if ai_msg.tool_calls else 'General Conversation'
             tools_used = len(ai_msg.tool_calls) > 0 if ai_msg.tool_calls else False
             
+            # Initialize tokenresponse if it doesn't exist
+            if session_id not in tokenresponse:
+                tokenresponse[session_id] = {}
+            
+            # Save token usage with all required keys
             tokenresponse[session_id].update({
-                'total_tokens': usage_metadata['total_tokens'],
-                'input_tokens': usage_metadata['input_tokens'],
-                'output_tokens': usage_metadata['output_tokens'],
-                'response_type': response_type,
+                'total_tokens': usage_metadata.get('total_tokens', 0) if usage_metadata else 0,
+                'input_tokens': usage_metadata.get('input_tokens', 0) if usage_metadata else 0,
+                'output_tokens': usage_metadata.get('output_tokens', 0) if usage_metadata else 0,
+                'response_type': response_type,  # This was missing sometimes
                 'tools_used': tools_used,
                 'source': chat_system,
                 'run_id': run_id

@@ -63,6 +63,7 @@ def chathistory(request):
 # -------------------------------
 def document_view(request):
     """Render document upload page."""
+    print(uploaded_documents)
     return render(request, 'document.html')
 
 
