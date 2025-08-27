@@ -25,7 +25,7 @@ messages = []        # in-memory messages list
 # -------------------------------
 load_dotenv()
 OPENAIKEY = os.getenv('OPEN_AI_KEY')
-MODEL = "gpt-3.5-turbo"
+MODEL = "gpt-4-turbo"
 
 
 # -------------------------------
