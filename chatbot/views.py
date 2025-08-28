@@ -39,6 +39,12 @@ load_dotenv()
 OPENAIKEY = os.getenv('OPEN_AI_KEY')
 MODEL = "gpt-4-turbo"
 
+try:
+    from .admin_views import uploaded_documents
+except ImportError:
+    # Fallback if import fails
+    uploaded_documents = {}
+
 # Tracks name validation per session
 user_name_status = {}  # session_id -> {'name_validated': bool, 'name': str}
 
@@ -73,6 +79,7 @@ system_message = """You are an expert SEO assistant with name validation capabil
     8. You can analyze uploaded documents for SEO-related insights when asked.
     9. Always provide actionable, practical SEO recommendations with clear steps.
     10. If user sends any message before providing a valid name, remind them to share their name first.
+    11. If the user provides both a URL and a document ID, call the `validate_url_with_document` tool to parse the URL and validate it against the SEO guideline document.
     """
 
 welcome_message = """👋 **Welcome to your Personal SEO Assistant!**
@@ -92,7 +99,8 @@ welcome_message = """👋 **Welcome to your Personal SEO Assistant!**
     I can also help with:  
     - Basic calculations (just ask me to multiply numbers)  
     - URL validation and title fetching  
-    - Document analysis for SEO insights
+    - Document analysis for SEO insights  
+    - ✅ **URL + Document SEO Guideline Validation** (check a webpage against your uploaded SEO guideline document)
 
     But first, I'd love to know who I'm talking to. **What's your name?**  
 
@@ -102,6 +110,7 @@ welcome_message = """👋 **Welcome to your Personal SEO Assistant!**
     ✨ **A clear roadmap to achieve your SEO goals**  
 
     So please tell me your name, and let's start your SEO journey together! 🚀✨"""
+
 
 # This doesn't look like a name, ask for name first
 name_request_message = """🙏 **Please provide your name first!**
@@ -125,7 +134,6 @@ def multiply(a: float, b: float) -> float:
     global chat_system
     chat_system = "Tool call - Multiply"
     return a * b
-
 
 @tool
 def validate_and_fetch_url(url: str) -> str:
@@ -151,7 +159,6 @@ def validate_and_fetch_url(url: str) -> str:
         return f"✅ URL is valid.\nTitle: {title}"
     except requests.exceptions.RequestException as e:
         return f"⚠️ URL validation passed, but content fetch failed.\nError: {str(e)}"
-
 
 @tool
 def validate_name(name: str) -> str:
@@ -243,7 +250,7 @@ Once you share your name, I'll be able to provide personalized SEO assistance, k
 @tool
 def seo_url_parser(url: str) -> str:
     """
-    Comprehensive URL parser that validates URL and extracts headings, metadata, and FAQ data.
+    SEO URL parser that validates URL and extracts headings, metadata, and FAQ data.
     
     Args:
         url: The URL to parse and extract data from
@@ -252,7 +259,7 @@ def seo_url_parser(url: str) -> str:
         JSON string containing validation status, headings, metadata, and FAQ data
     """
     global chat_system
-    chat_system = "Tool call - Comprehensive URL Parser"
+    chat_system = "Tool call - SEO URL Parser"
     
     result = {
         "url": url,
@@ -292,21 +299,13 @@ def seo_url_parser(url: str) -> str:
         
         # Step 5: Extract Headings
         result["headings"] = extract_headings(soup)
-
-        
-        
+   
         # Step 6: Extract FAQ Data
         result["faq_data"] = extract_faq_data(soup)
         
         # Step 7: Extract Additional SEO Data
         result["additional_data"] = extract_additional_seo_data(soup, url)
         
-        print("*"*60)
-        print("*"*60)
-        print(result)
-        print("*"*60)
-        print("*"*60)
-
         return json.dumps(result, indent=2, ensure_ascii=False)
         
     except requests.exceptions.RequestException as e:
@@ -315,6 +314,88 @@ def seo_url_parser(url: str) -> str:
     except Exception as e:
         result["validation"]["error"] = f"Parsing error: {str(e)}"
         return json.dumps(result, indent=2)
+
+@tool
+def validate_url_with_document(url: str, document_id: str) -> str:
+    """
+    Validate and parse a URL, then compare the results against an uploaded SEO guideline document.
+
+    Args:
+        url: The URL to validate and parse
+        document_id: The document ID of the uploaded SEO guideline file
+
+    Returns:
+        JSON string with comparison results + parsed SEO analysis
+    """
+    global chat_system
+    
+
+    try:
+        # Step 1: Parse the URL using existing seo_url_parser
+        parsed_data_json = seo_url_parser.invoke({"url": url})
+        parsed_data = json.loads(parsed_data_json)
+
+        chat_system = "Tool call - URL + Document Validation"
+
+        # Step 2: Fetch the uploaded document from in-memory store
+        if document_id not in uploaded_documents:
+            return json.dumps({
+                "success": False,
+                "error": f"SEO guideline document with ID {document_id} not found"
+            }, indent=2)
+
+        doc_info = uploaded_documents[document_id]
+        file_path = doc_info["file_path"]
+
+        # Step 3: Read document contents
+        guideline_text = ""
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                guideline_text = f.read()
+        except Exception as e:
+            return json.dumps({
+                "success": False,
+                "error": f"Failed to read document: {str(e)}"
+            }, indent=2)
+
+        # Step 4: Perform compliance checks
+        compliance = []
+        non_compliance = []
+
+        # Example: Check if meta description required
+        if "meta description" in guideline_text.lower() and not parsed_data["metadata"].get("description"):
+            non_compliance.append("Missing meta description.")
+        else:
+            compliance.append("Meta description present.")
+
+        # Example: Check if FAQ schema required
+        if "faq" in guideline_text.lower() and not parsed_data.get("faq_data"):
+            non_compliance.append("Missing FAQ structured content.")
+        else:
+            compliance.append("FAQ data present.")
+
+        # Step 5: Build comparison result (now includes parsed SEO analysis)
+        comparison_result = {
+            "url": url,
+            "document_id": document_id,
+            "validation": parsed_data.get("validation", {}),
+            "compliance": compliance,
+            "non_compliance": non_compliance,
+            "seo_analysis": {
+                "metadata": parsed_data.get("metadata", {}),
+                "headings": parsed_data.get("headings", {}),
+                "faq_data": parsed_data.get("faq_data", []),
+                "additional_data": parsed_data.get("additional_data", {})
+            }
+        }
+
+        return json.dumps(comparison_result, indent=2, ensure_ascii=False)
+
+    except Exception as e:
+        return json.dumps({
+            "success": False,
+            "error": f"Validation failed: {str(e)}"
+        }, indent=2)
 
 # =============================
 # Simple Views (Frontend Pages)
@@ -492,7 +573,7 @@ def chatbot_input(request):
         )
 
         # Tools available
-        tools = [multiply, validate_and_fetch_url, validate_name, seo_url_parser]
+        tools = [multiply, validate_and_fetch_url, validate_name, seo_url_parser,validate_url_with_document]
 
         llm = ChatOpenAI(
             temperature=0.7,
@@ -630,7 +711,8 @@ def chatbot_input(request):
                 "multiply": multiply,
                 "validate_and_fetch_url":validate_and_fetch_url,
                 "validate_name": validate_name,
-                "seo_url_parser":seo_url_parser
+                "seo_url_parser":seo_url_parser,
+                "validate_url_with_document":validate_url_with_document
             }
 
             for tool_call in ai_msg.tool_calls:
@@ -752,6 +834,7 @@ def stream_static_message(message):
 def build_stream_response(llm_with_tools, messages, ai_msg, session_id, chat_system, count):
     """Unified streaming response generator with token usage tracking"""
     try:
+
         final_response_content = ""
         usage_metadata = None
         run_id = None
