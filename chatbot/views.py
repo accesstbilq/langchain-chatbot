@@ -79,7 +79,10 @@ system_message = """You are an expert SEO assistant with name validation capabil
     8. You can analyze uploaded documents for SEO-related insights when asked.
     9. Always provide actionable, practical SEO recommendations with clear steps.
     10. If user sends any message before providing a valid name, remind them to share their name first.
-    11. If the user provides both a URL and a document ID, call the `validate_url_with_document` tool to parse the URL and validate it against the SEO guideline document.
+    11. If the user provides a URL, call the `seo_url_parser` tool to parse the content and extract metadata, headings, FAQs, etc.
+	12. If the user provides a URL + 1 Document ID for SEO guidelines, call the `validate_url_with_document_seo_guideline` tool to check compliance against SEO guidelines.
+	13. If the user provides a URL + 1 Document ID for semantic guidelines, call the `validate_url_with_document_semantic_guideline` tool to check compliance against Semantic guidelines.
+	14. If the user provides a URL + 2 Document IDs (one for SEO guidelines and another for semantic guidelines), call the `validate_url_with_two_documents` tool to check compliance against both guidelines.
     """
 
 welcome_message = """👋 **Welcome to your Personal SEO Assistant!**
@@ -100,7 +103,9 @@ welcome_message = """👋 **Welcome to your Personal SEO Assistant!**
     - Basic calculations (just ask me to multiply numbers)  
     - URL validation and title fetching  
     - Document analysis for SEO insights  
-    - ✅ **URL + Document SEO Guideline Validation** (check a webpage against your uploaded SEO guideline document)
+    - URL + 1 Document for SEO Guideline Validation  
+    - URL + 1 Document for Semantic Guideline Validation  
+    - URL + 2 Documents (SEO + Semantic Guideline Validation)
 
     But first, I'd love to know who I'm talking to. **What's your name?**  
 
@@ -316,7 +321,7 @@ def seo_url_parser(url: str) -> str:
         return json.dumps(result, indent=2)
 
 @tool
-def validate_url_with_document(url: str, document_id: str) -> str:
+def validate_url_with_document_seo_guideline(url: str, document_id: str) -> str:
     """
     Validate and parse a URL, then compare the results against an uploaded SEO guideline document.
 
@@ -335,8 +340,7 @@ def validate_url_with_document(url: str, document_id: str) -> str:
         parsed_data_json = seo_url_parser.invoke({"url": url})
         parsed_data = json.loads(parsed_data_json)
 
-        chat_system = "Tool call - URL + Document Validation"
-
+        chat_system = "Tool call - URL + SEO Document Validation"
         # Step 2: Fetch the uploaded document from in-memory store
         if document_id not in uploaded_documents:
             return json.dumps({
@@ -377,7 +381,181 @@ def validate_url_with_document(url: str, document_id: str) -> str:
         # Step 5: Build comparison result (now includes parsed SEO analysis)
         comparison_result = {
             "url": url,
-            "document_id": document_id,
+            "seo_document_id": document_id,
+            "validation": parsed_data.get("validation", {}),
+            "compliance": compliance,
+            "non_compliance": non_compliance,
+            "seo_analysis": {
+                "metadata": parsed_data.get("metadata", {}),
+                "headings": parsed_data.get("headings", {}),
+                "faq_data": parsed_data.get("faq_data", []),
+                "additional_data": parsed_data.get("additional_data", {})
+            }
+        }
+
+        return json.dumps(comparison_result, indent=2, ensure_ascii=False)
+
+    except Exception as e:
+        return json.dumps({
+            "success": False,
+            "error": f"Validation failed: {str(e)}"
+        }, indent=2)
+
+@tool
+def validate_url_with_document_semantic_guideline(url: str, document_id: str) -> str:
+    """
+    Validate and parse a URL, then compare results against a Semantic guideline document.
+
+    Args:
+        url: The URL to validate and parse
+        document_id: Document ID for Semantic guideline
+
+    Returns:
+        JSON string with compliance results + parsed SEO analysis
+    """
+    global chat_system
+    
+    try:
+        # Step 1: Parse the URL
+        parsed_data_json = seo_url_parser.invoke({"url": url})
+        parsed_data = json.loads(parsed_data_json)
+        chat_system = "Tool call - URL + Semantic Document Validation"
+
+        # Step 2: Fetch semantic document
+        if document_id not in uploaded_documents:
+            return json.dumps({
+                "success": False,
+                "error": f"Semantic guideline document with ID {document_id} not found"
+            }, indent=2)
+
+        doc_info = uploaded_documents[document_id]
+        file_path = doc_info["file_path"]
+
+        # Step 3: Read file contents
+        guideline_text = ""
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                guideline_text = f.read()
+        except Exception as e:
+            return json.dumps({
+                "success": False,
+                "error": f"Failed to read document: {str(e)}"
+            }, indent=2)
+
+        # Step 4: Semantic checks
+        compliance = []
+        non_compliance = []
+
+        if "h1" in guideline_text.lower() and not parsed_data["headings"].get("h1"):
+            non_compliance.append("Missing H1 heading.")
+        else:
+            compliance.append("H1 heading present.")
+
+        if "keywords" in guideline_text.lower() and not parsed_data["metadata"].get("keywords"):
+            non_compliance.append("Missing meta keywords.")
+        else:
+            compliance.append("Keywords present.")
+
+        if "readability" in guideline_text.lower() and parsed_data.get("additional_data", {}).get("content_analysis", {}).get("readability_score") == "Hard":
+            non_compliance.append("Content readability is hard, needs improvement.")
+        else:
+            compliance.append("Content readability acceptable.")
+
+        # Step 5: Build result
+        comparison_result = {
+            "url": url,
+            "semantic_document_id": document_id,
+            "validation": parsed_data.get("validation", {}),
+            "compliance": compliance,
+            "non_compliance": non_compliance,
+            "seo_analysis": {
+                "metadata": parsed_data.get("metadata", {}),
+                "headings": parsed_data.get("headings", {}),
+                "faq_data": parsed_data.get("faq_data", []),
+                "additional_data": parsed_data.get("additional_data", {})
+            }
+        }
+
+        return json.dumps(comparison_result, indent=2, ensure_ascii=False)
+
+    except Exception as e:
+        return json.dumps({
+            "success": False,
+            "error": f"Validation failed: {str(e)}"
+        }, indent=2)
+
+@tool
+def validate_url_with_two_documents(url: str, seo_doc_id: str, semantic_doc_id: str) -> str:
+    """
+    Validate and parse a URL, then compare results against SEO and Semantic guideline documents.
+
+    Args:
+        url: The URL to validate and parse
+        seo_doc_id: Document ID for SEO guideline
+        semantic_doc_id: Document ID for Semantic guideline
+
+    Returns:
+        JSON string with compliance results + parsed SEO analysis
+    """
+    global chat_system
+    try:
+        # Step 1: Parse URL using existing seo_url_parser
+        parsed_data_json = seo_url_parser.invoke({"url": url})
+        parsed_data = json.loads(parsed_data_json)
+
+        chat_system = "Tool call - URL + Two Documents Validation (one for SEO guidelines and another for semantic guidelines)"
+
+        # Step 2: Fetch both documents
+        if seo_doc_id not in uploaded_documents:
+            return json.dumps({"success": False, "error": f"SEO document {seo_doc_id} not found"}, indent=2)
+        if semantic_doc_id not in uploaded_documents:
+            return json.dumps({"success": False, "error": f"Semantic document {semantic_doc_id} not found"}, indent=2)
+
+        seo_doc = uploaded_documents[seo_doc_id]
+        semantic_doc = uploaded_documents[semantic_doc_id]
+
+        # Read documents
+        def read_doc(file_path):
+            try:
+                with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                    return f.read()
+            except:
+                return ""
+
+        seo_text = read_doc(seo_doc["file_path"])
+        semantic_text = read_doc(semantic_doc["file_path"])
+
+        # Step 3: Compliance checks
+        compliance = []
+        non_compliance = []
+
+        # SEO checks
+        if "meta description" in seo_text.lower() and not parsed_data["metadata"].get("description"):
+            non_compliance.append("SEO: Missing meta description.")
+        else:
+            compliance.append("SEO: Meta description present.")
+
+        if "faq" in seo_text.lower() and not parsed_data.get("faq_data"):
+            non_compliance.append("SEO: Missing FAQ structured content.")
+        else:
+            compliance.append("SEO: FAQ data present.")
+
+        # Semantic checks
+        if "h1" in semantic_text.lower() and not parsed_data["headings"].get("h1"):
+            non_compliance.append("Semantic: Missing H1 heading.")
+        else:
+            compliance.append("Semantic: H1 heading present.")
+
+        if "keywords" in semantic_text.lower() and not parsed_data["metadata"].get("keywords"):
+            non_compliance.append("Semantic: Missing meta keywords.")
+        else:
+            compliance.append("Semantic: Keywords present.")
+
+        # Step 4: Build combined result
+        comparison_result = {
+            "url": url,
+            "seo_document_id": seo_doc_id,
+            "semantic_document_id": semantic_doc_id,
             "validation": parsed_data.get("validation", {}),
             "compliance": compliance,
             "non_compliance": non_compliance,
@@ -573,7 +751,7 @@ def chatbot_input(request):
         )
 
         # Tools available
-        tools = [multiply, validate_and_fetch_url, validate_name, seo_url_parser,validate_url_with_document]
+        tools = [multiply, validate_and_fetch_url, validate_name, seo_url_parser,validate_url_with_document_seo_guideline,validate_url_with_document_semantic_guideline,validate_url_with_two_documents]
 
         llm = ChatOpenAI(
             temperature=0.7,
@@ -712,7 +890,9 @@ def chatbot_input(request):
                 "validate_and_fetch_url":validate_and_fetch_url,
                 "validate_name": validate_name,
                 "seo_url_parser":seo_url_parser,
-                "validate_url_with_document":validate_url_with_document
+                "validate_url_with_document_seo_guideline":validate_url_with_document_seo_guideline,
+                "validate_url_with_document_semantic_guideline":validate_url_with_document_semantic_guideline,
+                "validate_url_with_two_documents":validate_url_with_two_documents
             }
 
             for tool_call in ai_msg.tool_calls:
