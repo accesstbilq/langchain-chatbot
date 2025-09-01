@@ -29,4 +29,5 @@ urlpatterns = [
     path('documents/upload/', admin_views.upload_documents, name='upload_documents'), # Upload new documents
     path('documents/list/', admin_views.list_documents, name='list_documents'),       # List uploaded documents
     path('documents/delete/', admin_views.delete_document, name='delete_document'),   # Delete a document
+    path('documents/<str:doc_id>/', admin_views.download_document, name='download_document'), # Download a document
 ]

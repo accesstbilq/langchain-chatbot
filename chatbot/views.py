@@ -15,6 +15,9 @@ from django.http import StreamingHttpResponse
 from urllib.parse import urljoin, urlparse
 # Database models
 from .models import ChatSession, ChatMessage
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet
+import datetime
 
 # Parsing HTML
 from bs4 import BeautifulSoup
@@ -38,6 +41,7 @@ messages = []
 load_dotenv()
 OPENAIKEY = os.getenv('OPEN_AI_KEY')
 MODEL = "gpt-4-turbo"
+APP_URL = "http://127.0.0.1:8000/"
 
 try:
     from .admin_views import uploaded_documents
@@ -76,14 +80,18 @@ system_message = """You are an expert SEO assistant with name validation capabil
     5. If the user asks a question unrelated to SEO, politely say you specialize in SEO and cannot answer other topics.
     6. If the user clearly asks for a basic arithmetic calculation (e.g., multiplication, addition, subtraction, division), call the appropriate calculation tool.
     7. If the user provides or asks to validate a URL, call the `validate_and_fetch_url` tool to check its validity and fetch its title.
-    8. You can analyze uploaded documents for SEO-related insights when asked.
-    9. Always provide actionable, practical SEO recommendations with clear steps.
-    10. If user sends any message before providing a valid name, remind them to share their name first.
-    11. If the user provides a URL, call the `seo_url_parser` tool to parse the content and extract metadata, headings, FAQs, etc.
-	12. If the user provides a URL + 1 Document ID for SEO guidelines, call the `validate_url_with_document_seo_guideline` tool to check compliance against SEO guidelines.
-	13. If the user provides a URL + 1 Document ID for semantic guidelines, call the `validate_url_with_document_semantic_guideline` tool to check compliance against Semantic guidelines.
-	14. If the user provides a URL + 2 Document IDs (one for SEO guidelines and another for semantic guidelines), call the `validate_url_with_two_documents` tool to check compliance against both guidelines.
+    8. If the user provides a URL, call the `seo_url_parser` tool to parse the content and extract metadata, headings, FAQs, etc.
+    9. If the user provides a URL + 1 Document ID for SEO guidelines, call the `validate_url_with_document_seo_guideline` tool to check compliance against SEO guidelines.
+    10. If the user provides a URL + 1 Document ID for Semantic guidelines, call the `validate_url_with_document_semantic_guideline` tool to check compliance against Semantic guidelines.
+    11. If the user provides a URL + 2 Document IDs (one for SEO guidelines and another for semantic guidelines), call the `validate_url_with_two_documents` tool to check compliance against both guidelines.
+    12. With Output Parsers: Ensure the result from `validate_url_with_two_documents` is structured using output parsers (so compliance, non-compliance, and analysis data are cleanly separated).
+    13. With PDF: After generating structured output for `validate_url_with_two_documents`, also create a PDF report of the analysis and return its document ID/path in the response.
+    14. You can analyze uploaded documents for SEO-related insights when asked.
+    15. Always provide actionable, practical SEO recommendations with clear steps.
+    16. If user sends any message before providing a valid name, remind them to share their name first.
     """
+
+
 
 welcome_message = """👋 **Welcome to your Personal SEO Assistant!**
 
@@ -712,7 +720,7 @@ def generate_name_request_stream(session_id):
             'run_id': run_id
         })
         
-        session, created = get_or_create_chat_session(session_id, run_id)
+        session, created = get_or_create_chat_session(session_id, run_id, None, False, 'welcome_message')
         save_message_to_db(session, messagedata, run_id, count)
         
     except Exception as e:
@@ -836,7 +844,7 @@ def chatbot_input(request):
                 })
 
                 # Save to database
-                session, created = get_or_create_chat_session(session_id, runid)
+                session, created = get_or_create_chat_session(session_id, runid, None, False, chat_system)
                 save_message_to_db(session, messagedata, runid, count)
                 
                 return StreamingHttpResponse(
@@ -1049,7 +1057,45 @@ def build_stream_response(llm_with_tools, messages, ai_msg, session_id, chat_sys
                 'source': chat_system,
                 'run_id': run_id
             })
-            session, create = get_or_create_chat_session(session_id, run_id)
+
+
+            
+            if chat_system == "Tool call - Name Validation": 
+                first_name = extract_name(final_response_content)
+                session, create = get_or_create_chat_session(session_id, run_id, first_name, True,chat_system)
+
+            else:
+                session, create = get_or_create_chat_session(session_id, run_id,None,False,chat_system)
+
+            # === PDF GENERATION: Save entire final_response_content ===
+            if chat_system == "Tool call - URL + Two Documents Validation (one for SEO guidelines and another for semantic guidelines)": 
+                try:
+                    pdf_id = str(uuid.uuid4())
+                    pdf_filename = f"chat_output_{pdf_id}.pdf"
+                    pdf_path = os.path.join("documents", pdf_filename)
+                    os.makedirs("documents", exist_ok=True)
+
+                    doc = SimpleDocTemplate(pdf_path)
+                    styles = getSampleStyleSheet()
+                    story = []
+
+                    story.append(Paragraph("<b>SEO + Semantic Guideline Validation Report</b>", styles["Heading1"]))
+                    story.append(Spacer(1, 12))
+                    story.append(Paragraph(final_response_content.replace("\n", "<br/>"), styles["Normal"]))
+
+                    doc.build(story)
+
+                    uploaded_documents[pdf_id] = {
+                        "file_name": pdf_filename,
+                        "file_path": pdf_path,
+                        "uploaded_at": datetime.datetime.utcnow().isoformat()
+                    }
+
+                    # Yield a final chunk with PDF link
+                    yield f"\n\n📄 Response saved in PDF: <a href='{APP_URL}documents/{pdf_id}'>Click here to view the detailed report</a>\n"
+
+                except Exception as e:
+                    yield f"\n[PDF generation failed: {str(e)}]"
 
             messagedata[session_id].append({
                 "message_type": "ai",
@@ -1068,6 +1114,8 @@ def build_stream_response(llm_with_tools, messages, ai_msg, session_id, chat_sys
 
             save_message_to_db(session, messagedata, run_id, count)
 
+            
+
     except (OpenAIError, APITimeoutError) as e:
         yield f"\n[Error occurred: {str(e)}]"
 
@@ -1075,7 +1123,7 @@ def build_stream_response(llm_with_tools, messages, ai_msg, session_id, chat_sys
 # =============================
 # Database Helpers
 # =============================
-def get_or_create_chat_session(session_id, run_id=None):
+def get_or_create_chat_session(session_id, run_id=None, user_name=None, name_validated=False , chat_system='welcome_message'):
     
     """Get existing chat session or create new one"""
     
@@ -1083,15 +1131,23 @@ def get_or_create_chat_session(session_id, run_id=None):
         session, created = ChatSession.objects.get_or_create(
             session_id=session_id,
             defaults={
-               'run_id': run_id,
-               'is_active': True
+                'run_id': run_id,
+                'user_name': user_name,
+                'name_validated': name_validated,
+                'is_active': True
             }
         )
         
         # Update run_id if provided and different
         if run_id and session.run_id != run_id:
             session.run_id = run_id
-            session.save(update_fields=['run_id', 'updated_at'])
+            if chat_system == "Tool call - Name Validation": 
+            
+                session.user_name = user_name
+                session.name_validated=name_validated
+                session.save(update_fields=['run_id','user_name','updated_at','name_validated',])
+            else:
+                session.save(update_fields=['run_id','updated_at'])
             
         return session, created
     except Exception as e:
@@ -1162,10 +1218,10 @@ def generate_message_id():
     return f"msg--{uuid.uuid4().hex[:8]}-{uuid.uuid4().hex[:4]}-{uuid.uuid4().hex[:4]}-{uuid.uuid4().hex[:4]}-{uuid.uuid4().hex[:12]}"
 
 
-
 def generate_run_id():
     """Generate a unique run ID for conversation tracking"""
     return f"run--{uuid.uuid4().hex[:8]}-{uuid.uuid4().hex[:4]}-{uuid.uuid4().hex[:4]}-{uuid.uuid4().hex[:4]}-{uuid.uuid4().hex[:12]}"
+
 
 def extract_metadata(soup, url):
     """Extract all metadata from the page"""
@@ -1387,3 +1443,19 @@ def calculate_simple_readability(text):
     else:
         return "Hard"
 
+def extract_name(message: str) -> str:
+    # Case 1: after comma and before ! or ?
+    m = re.search(r",\s*([^!?]+)[!?]", message)
+    if m:
+        return m.group(1).strip(" '")
+
+    # Case 2: after greeting (Hello, Hi, etc.) before ! or ?
+    m = re.search(
+        r"\b(?:Hello|Hi|Hey|Welcome|Great to meet you|Nice to meet you)[,\s]+([^!?]+)[!?]", 
+        message, re.IGNORECASE
+    )
+    if m:
+        return m.group(1).strip(" '")
+
+    # Case 3: fallback → first word
+    return message.strip().split()[0].strip(" '")

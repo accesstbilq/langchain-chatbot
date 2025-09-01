@@ -12,6 +12,7 @@ from datetime import datetime
 import mimetypes
 import uuid
 from .models import ChatSession, ChatMessage
+from django.http import FileResponse, Http404
 
 # -------------------------------
 # Global variables
@@ -251,3 +252,16 @@ def load_chat_history_from_db(session_id):
     ).exclude(content__isnull=True).exclude(content__exact='').order_by('-created_at')
     
     return messages
+
+def download_document(request, doc_id):
+    """Serve uploaded PDFs and other documents by ID"""
+    if doc_id not in uploaded_documents:
+        raise Http404("Document not found")
+
+    file_info = uploaded_documents[doc_id]
+    file_path = file_info["file_path"]
+    
+    try:
+        return FileResponse(open(file_path, "rb"), as_attachment=True, filename=file_info["file_name"])
+    except FileNotFoundError:
+        raise Http404("File not found on server")
