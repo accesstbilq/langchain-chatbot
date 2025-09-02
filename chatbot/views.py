@@ -28,6 +28,7 @@ from langchain.schema import SystemMessage, AIMessage
 from langchain_core.messages import ToolMessage,HumanMessage,AIMessageChunk
 from langchain.tools import tool
 from openai import OpenAIError, APITimeoutError
+from langchain_community.document_loaders.sitemap import SitemapLoader
 
 # =============================
 # Global Variables & Config
@@ -36,6 +37,13 @@ from openai import OpenAIError, APITimeoutError
 # Tracks current chat system state
 chat_system = ""
 messages = []
+
+excluded_extensions = {
+    '.php', '.doc', '.docx', '.mp3', '.wav', '.jpg', '.png', '.pdf', '.csv',
+    '.mp4', '.avi', '.mov', '.mkv',  # Video files
+    '.zip', '.rar', '.tar', '.gz',  # Compressed files
+    '.xls', '.xlsx', '.xlsm'  # Excel files
+}
 
 # Load environment variables for OpenAI API
 load_dotenv()
@@ -89,9 +97,9 @@ system_message = """You are an expert SEO assistant with name validation capabil
     14. You can analyze uploaded documents for SEO-related insights when asked.
     15. Always provide actionable, practical SEO recommendations with clear steps.
     16. If user sends any message before providing a valid name, remind them to share their name first.
+    17. If the user provides multiple URLs + 2 Document IDs (one for SEO guidelines and another for semantic guidelines), call the `validate_multiple_urls_with_two_documents` tool to check compliance against both guidelines.
+    18. If the user provides a Sitemap URL + 2 Document IDs (one for SEO guidelines and another for semantic guidelines), fetch all URLs from the sitemap and call the `validate_sitemap_with_two_documents` tool to check compliance against both guidelines.
     """
-
-
 
 welcome_message = """👋 **Welcome to your Personal SEO Assistant!**
 
@@ -114,6 +122,8 @@ welcome_message = """👋 **Welcome to your Personal SEO Assistant!**
     - URL + 1 Document for SEO Guideline Validation  
     - URL + 1 Document for Semantic Guideline Validation  
     - URL + 2 Documents (SEO + Semantic Guideline Validation)
+    - Multiple URLs + 2 Documents → Full SEO + Semantic Guideline Validation for all pages
+    - Sitemap URLs + 2 Documents → Full SEO + Semantic Guideline Validation for all pages
 
     But first, I'd love to know who I'm talking to. **What's your name?**  
 
@@ -583,6 +593,163 @@ def validate_url_with_two_documents(url: str, seo_doc_id: str, semantic_doc_id: 
             "error": f"Validation failed: {str(e)}"
         }, indent=2)
 
+@tool
+def validate_multiple_urls_with_two_documents(urls: list, seo_doc_id: str, semantic_doc_id: str) -> str:
+    """
+    Validate and parse multiple URLs, then compare results against SEO and Semantic guideline documents.
+
+    Args:
+        urls: A list of URLs to validate and parse
+        seo_doc_id: Document ID for SEO guideline
+        semantic_doc_id: Document ID for Semantic guideline
+
+    Returns:
+        JSON string with compliance results + parsed SEO analysis for each URL
+    """
+    global chat_system
+    try:
+        
+        # Step 1: Ensure both documents exist
+        if seo_doc_id not in uploaded_documents:
+            return json.dumps({"success": False, "error": f"SEO document {seo_doc_id} not found"}, indent=2)
+        if semantic_doc_id not in uploaded_documents:
+            return json.dumps({"success": False, "error": f"Semantic document {semantic_doc_id} not found"}, indent=2)
+
+        seo_doc = uploaded_documents[seo_doc_id]
+        semantic_doc = uploaded_documents[semantic_doc_id]
+
+        # Read documents
+        def read_doc(file_path):
+            try:
+                with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                    return f.read()
+            except:
+                return ""
+
+        seo_text = read_doc(seo_doc["file_path"])
+        semantic_text = read_doc(semantic_doc["file_path"])
+
+        results = []
+
+        # Step 2: Iterate over URLs
+        for url in urls:
+            try:
+                # Parse each URL
+                parsed_data_json = seo_url_parser.invoke({"url": url})
+                parsed_data = json.loads(parsed_data_json)
+
+                chat_system = "Tool call - Multiple URLs + Two Documents Validation (SEO + Semantic guidelines)"
+                
+                compliance = []
+                
+                non_compliance = []
+
+                # SEO checks
+                if "meta description" in seo_text.lower() and not parsed_data["metadata"].get("description"):
+                    non_compliance.append("SEO: Missing meta description.")
+                else:
+                    compliance.append("SEO: Meta description present.")
+
+                if "faq" in seo_text.lower() and not parsed_data.get("faq_data"):
+                    non_compliance.append("SEO: Missing FAQ structured content.")
+                else:
+                    compliance.append("SEO: FAQ data present.")
+
+                # Semantic checks
+                if "h1" in semantic_text.lower() and not parsed_data["headings"].get("h1"):
+                    non_compliance.append("Semantic: Missing H1 heading.")
+                else:
+                    compliance.append("Semantic: H1 heading present.")
+
+                if "keywords" in semantic_text.lower() and not parsed_data["metadata"].get("keywords"):
+                    non_compliance.append("Semantic: Missing meta keywords.")
+                else:
+                    compliance.append("Semantic: Keywords present.")
+
+                # Build combined result for this URL
+                comparison_result = {
+                    "url": url,
+                    "seo_document_id": seo_doc_id,
+                    "semantic_document_id": semantic_doc_id,
+                    "validation": parsed_data.get("validation", {}),
+                    "compliance": compliance,
+                    "non_compliance": non_compliance,
+                    "seo_analysis": {
+                        "metadata": parsed_data.get("metadata", {}),
+                        "headings": parsed_data.get("headings", {}),
+                        "faq_data": parsed_data.get("faq_data", []),
+                        "additional_data": parsed_data.get("additional_data", {})
+                    }
+                }
+                results.append(comparison_result)
+
+            except Exception as inner_e:
+                results.append({
+                    "url": url,
+                    "success": False,
+                    "error": f"Validation failed for {url}: {str(inner_e)}"
+                })
+
+        return json.dumps({"success": True, "results": results}, indent=2, ensure_ascii=False)
+
+    except Exception as e:
+        return json.dumps({
+            "success": False,
+            "error": f"Multiple URL validation failed: {str(e)}"
+        }, indent=2)
+
+@tool
+def validate_sitemap_with_two_documents(sitemap_url: str, seo_doc_id: str, semantic_doc_id: str) -> str:
+    """
+    Validate and parse Sitemap URL, then compare results against SEO and Semantic guideline documents.
+
+    Args:
+        urls: A list of URLs to validate and parse
+        seo_doc_id: Document ID for SEO guideline
+        semantic_doc_id: Document ID for Semantic guideline
+
+    Returns:
+        JSON string with compliance results + parsed SEO analysis for each URL
+    """
+    global chat_system
+    try:
+        # Step 1: Load all URLs from sitemap
+        loader = SitemapLoader(web_path=sitemap_url, continue_on_failure=True)
+        documents = loader.load()
+
+        linkurls = []
+        for doc in documents:
+            url = doc.metadata.get("loc")
+            if url and is_valid_url(url):
+                linkurls.append(url)
+
+        print("urls",len(linkurls))
+        
+
+        # urls = [doc.metadata["source"] for doc in documents]
+        if not linkurls:
+            return json.dumps({"success": False, "error": "No URLs found in sitemap"}, indent=2)
+
+        # Step 2: Validate each URL
+        results = []
+        
+        for u in linkurls:
+            print("*"*60)
+            print("*"*60)
+            print("urls",u)
+            print("*"*60)
+            print("*"*60)
+            result_json = validate_url_with_two_documents.invoke({"url": u,"seo_doc_id": seo_doc_id,"semantic_doc_id": semantic_doc_id})
+            results.append(json.loads(result_json))
+            print(results)
+            
+
+        chat_system = "Tool call - Sitemap URL + Two Documents Validation (SEO + Semantic guidelines)"
+
+        # Step 3: Build structured response
+        return json.dumps({"success": True,  "sitemap_url": sitemap_url, "total_urls": len(linkurls), "results": results}, indent=2, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"success": False, "error": f"Sitemap validation failed: {str(e)}"}, indent=2)
 # =============================
 # Simple Views (Frontend Pages)
 # =============================
@@ -759,7 +926,7 @@ def chatbot_input(request):
         )
 
         # Tools available
-        tools = [multiply, validate_and_fetch_url, validate_name, seo_url_parser,validate_url_with_document_seo_guideline,validate_url_with_document_semantic_guideline,validate_url_with_two_documents]
+        tools = [multiply, validate_and_fetch_url, validate_name, seo_url_parser,validate_url_with_document_seo_guideline,validate_url_with_document_semantic_guideline,validate_url_with_two_documents,validate_multiple_urls_with_two_documents,validate_sitemap_with_two_documents]
 
         llm = ChatOpenAI(
             temperature=0.7,
@@ -900,7 +1067,9 @@ def chatbot_input(request):
                 "seo_url_parser":seo_url_parser,
                 "validate_url_with_document_seo_guideline":validate_url_with_document_seo_guideline,
                 "validate_url_with_document_semantic_guideline":validate_url_with_document_semantic_guideline,
-                "validate_url_with_two_documents":validate_url_with_two_documents
+                "validate_url_with_two_documents":validate_url_with_two_documents,
+                "validate_multiple_urls_with_two_documents":validate_multiple_urls_with_two_documents,
+                "validate_sitemap_with_two_documents":validate_sitemap_with_two_documents
             }
 
             for tool_call in ai_msg.tool_calls:
@@ -1068,7 +1237,10 @@ def build_stream_response(llm_with_tools, messages, ai_msg, session_id, chat_sys
                 session, create = get_or_create_chat_session(session_id, run_id,None,False,chat_system)
 
             # === PDF GENERATION: Save entire final_response_content ===
-            if chat_system == "Tool call - URL + Two Documents Validation (one for SEO guidelines and another for semantic guidelines)": 
+            if chat_system in [
+                "Tool call - URL + Two Documents Validation (one for SEO guidelines and another for semantic guidelines)",
+                "Tool call - Multiple URLs + Two Documents Validation (SEO + Semantic guidelines)","Tool call - Sitemap URL + Two Documents Validation (SEO + Semantic guidelines)"
+            ]:
                 try:
                     pdf_id = str(uuid.uuid4())
                     pdf_filename = f"chat_output_{pdf_id}.pdf"
@@ -1459,3 +1631,15 @@ def extract_name(message: str) -> str:
 
     # Case 3: fallback → first word
     return message.strip().split()[0].strip(" '")
+
+def is_valid_url(url: str) -> bool:
+    """Check if URL is valid (not 404) and not excluded by extension."""
+    ext = os.path.splitext(url.split("?")[0])[1].lower()
+    if ext in excluded_extensions:
+        return False
+    
+    try:
+        response = requests.head(url, timeout=5, allow_redirects=True)
+        return response.status_code == 200
+    except requests.RequestException:
+        return False
