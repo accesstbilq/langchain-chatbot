@@ -39,7 +39,7 @@ chat_system = ""
 messages = []
 
 excluded_extensions = {
-    '.php', '.doc', '.docx', '.mp3', '.wav', '.jpg', '.png', '.pdf', '.csv',
+    '.php', '.doc', '.docx', '.mp3', '.wav', '.jpg', '.png', '.pdf', '.csv', '.html',
     '.mp4', '.avi', '.mov', '.mkv',  # Video files
     '.zip', '.rar', '.tar', '.gz',  # Compressed files
     '.xls', '.xlsx', '.xlsm'  # Excel files
@@ -48,7 +48,7 @@ excluded_extensions = {
 # Load environment variables for OpenAI API
 load_dotenv()
 OPENAIKEY = os.getenv('OPEN_AI_KEY')
-MODEL = "gpt-4-turbo"
+MODEL = "gpt-4.1"
 APP_URL = "http://127.0.0.1:8000/"
 
 try:
@@ -98,7 +98,7 @@ system_message = """You are an expert SEO assistant with name validation capabil
     15. Always provide actionable, practical SEO recommendations with clear steps.
     16. If user sends any message before providing a valid name, remind them to share their name first.
     17. If the user provides multiple URLs + 2 Document IDs (one for SEO guidelines and another for semantic guidelines), call the `validate_multiple_urls_with_two_documents` tool to check compliance against both guidelines.
-    18. If the user provides a Sitemap URL + 2 Document IDs (one for SEO guidelines and another for semantic guidelines), fetch all URLs from the sitemap and call the `validate_sitemap_with_two_documents` tool to check compliance against both guidelines.
+    18. If the user provides a Sitemap URL + 2 Document IDs (SEO + Semantic), fetch all URLs from the sitemap and call `validate_sitemap_with_two_documents` for compliance. Return results for each URL.
     """
 
 welcome_message = """👋 **Welcome to your Personal SEO Assistant!**
@@ -608,90 +608,20 @@ def validate_multiple_urls_with_two_documents(urls: list, seo_doc_id: str, seman
     """
     global chat_system
     try:
-        
-        # Step 1: Ensure both documents exist
-        if seo_doc_id not in uploaded_documents:
-            return json.dumps({"success": False, "error": f"SEO document {seo_doc_id} not found"}, indent=2)
-        if semantic_doc_id not in uploaded_documents:
-            return json.dumps({"success": False, "error": f"Semantic document {semantic_doc_id} not found"}, indent=2)
-
-        seo_doc = uploaded_documents[seo_doc_id]
-        semantic_doc = uploaded_documents[semantic_doc_id]
-
-        # Read documents
-        def read_doc(file_path):
-            try:
-                with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                    return f.read()
-            except:
-                return ""
-
-        seo_text = read_doc(seo_doc["file_path"])
-        semantic_text = read_doc(semantic_doc["file_path"])
-
         results = []
-
         # Step 2: Iterate over URLs
         for url in urls:
             try:
-                # Parse each URL
-                parsed_data_json = seo_url_parser.invoke({"url": url})
-                parsed_data = json.loads(parsed_data_json)
-
+                result_json = validate_url_with_two_documents.invoke({"url": url,"seo_doc_id": seo_doc_id,"semantic_doc_id": semantic_doc_id})
+                results.append(json.loads(result_json))
                 chat_system = "Tool call - Multiple URLs + Two Documents Validation (SEO + Semantic guidelines)"
-                
-                compliance = []
-                
-                non_compliance = []
-
-                # SEO checks
-                if "meta description" in seo_text.lower() and not parsed_data["metadata"].get("description"):
-                    non_compliance.append("SEO: Missing meta description.")
-                else:
-                    compliance.append("SEO: Meta description present.")
-
-                if "faq" in seo_text.lower() and not parsed_data.get("faq_data"):
-                    non_compliance.append("SEO: Missing FAQ structured content.")
-                else:
-                    compliance.append("SEO: FAQ data present.")
-
-                # Semantic checks
-                if "h1" in semantic_text.lower() and not parsed_data["headings"].get("h1"):
-                    non_compliance.append("Semantic: Missing H1 heading.")
-                else:
-                    compliance.append("Semantic: H1 heading present.")
-
-                if "keywords" in semantic_text.lower() and not parsed_data["metadata"].get("keywords"):
-                    non_compliance.append("Semantic: Missing meta keywords.")
-                else:
-                    compliance.append("Semantic: Keywords present.")
-
-                # Build combined result for this URL
-                comparison_result = {
-                    "url": url,
-                    "seo_document_id": seo_doc_id,
-                    "semantic_document_id": semantic_doc_id,
-                    "validation": parsed_data.get("validation", {}),
-                    "compliance": compliance,
-                    "non_compliance": non_compliance,
-                    "seo_analysis": {
-                        "metadata": parsed_data.get("metadata", {}),
-                        "headings": parsed_data.get("headings", {}),
-                        "faq_data": parsed_data.get("faq_data", []),
-                        "additional_data": parsed_data.get("additional_data", {})
-                    }
-                }
-                results.append(comparison_result)
-
             except Exception as inner_e:
                 results.append({
                     "url": url,
                     "success": False,
                     "error": f"Validation failed for {url}: {str(inner_e)}"
                 })
-
         return json.dumps({"success": True, "results": results}, indent=2, ensure_ascii=False)
-
     except Exception as e:
         return json.dumps({
             "success": False,
@@ -704,7 +634,7 @@ def validate_sitemap_with_two_documents(sitemap_url: str, seo_doc_id: str, seman
     Validate and parse Sitemap URL, then compare results against SEO and Semantic guideline documents.
 
     Args:
-        urls: A list of URLs to validate and parse
+        sitemap_url: The sitemap URL to fetch all links
         seo_doc_id: Document ID for SEO guideline
         semantic_doc_id: Document ID for Semantic guideline
 
@@ -722,9 +652,7 @@ def validate_sitemap_with_two_documents(sitemap_url: str, seo_doc_id: str, seman
             url = doc.metadata.get("loc")
             if url and is_valid_url(url):
                 linkurls.append(url)
-
-        print("urls",len(linkurls))
-        
+ 
 
         # urls = [doc.metadata["source"] for doc in documents]
         if not linkurls:
@@ -734,16 +662,8 @@ def validate_sitemap_with_two_documents(sitemap_url: str, seo_doc_id: str, seman
         results = []
         
         for u in linkurls:
-            print("*"*60)
-            print("*"*60)
-            print("urls",u)
-            print("*"*60)
-            print("*"*60)
             result_json = validate_url_with_two_documents.invoke({"url": u,"seo_doc_id": seo_doc_id,"semantic_doc_id": semantic_doc_id})
             results.append(json.loads(result_json))
-            print(results)
-            
-
         chat_system = "Tool call - Sitemap URL + Two Documents Validation (SEO + Semantic guidelines)"
 
         # Step 3: Build structured response
@@ -1633,7 +1553,13 @@ def extract_name(message: str) -> str:
     return message.strip().split()[0].strip(" '")
 
 def is_valid_url(url: str) -> bool:
-    """Check if URL is valid (not 404) and not excluded by extension."""
+    """Check if URL is valid (not 404) and not excluded by extension.
+       Skip URLs that contain query parameters (?)."""
+    # Skip URL if it contains '?'
+    if "?" in url:
+        return False  
+
+    # Get file extension (without query string)
     ext = os.path.splitext(url.split("?")[0])[1].lower()
     if ext in excluded_extensions:
         return False
