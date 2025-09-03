@@ -98,7 +98,9 @@ system_message = """You are an expert SEO assistant with name validation capabil
     15. Always provide actionable, practical SEO recommendations with clear steps.
     16. If user sends any message before providing a valid name, remind them to share their name first.
     17. If the user provides multiple URLs + 2 Document IDs (one for SEO guidelines and another for semantic guidelines), call the `validate_multiple_urls_with_two_documents` tool to check compliance against both guidelines.
-    18. If the user provides a Sitemap URL + 2 Document IDs (SEO + Semantic), fetch all URLs from the sitemap and call `validate_sitemap_with_two_documents` for compliance. Return results for each URL.
+    18. If the user provides a Sitemap URL + 2 Document IDs (SEO + Semantic), fetch ALL URLs from the sitemap and call `validate_sitemap_with_two_documents` for compliance. 
+    - Ensure every extracted URL is analyzed individually. 
+    - Return results for **all URLs separately**, not just a sample.
     """
 
 welcome_message = """👋 **Welcome to your Personal SEO Assistant!**
@@ -1111,7 +1113,6 @@ def stream_static_message(message):
 def build_stream_response(llm_with_tools, messages, ai_msg, session_id, chat_system, count):
     """Unified streaming response generator with token usage tracking"""
     try:
-
         final_response_content = ""
         usage_metadata = None
         run_id = None
