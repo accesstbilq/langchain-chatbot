@@ -15,7 +15,7 @@ from django.http import StreamingHttpResponse
 from urllib.parse import urljoin, urlparse
 # Database models
 from .models import ChatSession, ChatMessage
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
 from reportlab.lib.styles import getSampleStyleSheet
 import datetime
 
@@ -93,14 +93,11 @@ system_message = """You are an expert SEO assistant with name validation capabil
     10. If the user provides a URL + 1 Document ID for Semantic guidelines, call the `validate_url_with_document_semantic_guideline` tool to check compliance against Semantic guidelines.
     11. If the user provides a URL + 2 Document IDs (one for SEO guidelines and another for semantic guidelines), call the `validate_url_with_two_documents` tool to check compliance against both guidelines.
     12. With Output Parsers: Ensure the result from `validate_url_with_two_documents` is structured using output parsers (so compliance, non-compliance, and analysis data are cleanly separated).
-    13. With PDF: After generating structured output for `validate_url_with_two_documents`, also create a PDF report of the analysis and return its document ID/path in the response.
-    14. You can analyze uploaded documents for SEO-related insights when asked.
-    15. Always provide actionable, practical SEO recommendations with clear steps.
-    16. If user sends any message before providing a valid name, remind them to share their name first.
-    17. If the user provides multiple URLs + 2 Document IDs (one for SEO guidelines and another for semantic guidelines), call the `validate_multiple_urls_with_two_documents` tool to check compliance against both guidelines.
-    18. If the user provides a Sitemap URL + 2 Document IDs (SEO + Semantic), fetch ALL URLs from the sitemap and call `validate_sitemap_with_two_documents` for compliance. 
-    - Ensure every extracted URL is analyzed individually. 
-    - Return results for **all URLs separately**, not just a sample.
+    13. You can analyze uploaded documents for SEO-related insights when asked.
+    14. Always provide actionable, practical SEO recommendations with clear steps.
+    15. If user sends any message before providing a valid name, remind them to share their name first.
+    16. If the user provides multiple URLs + 2 Document IDs (one for SEO guidelines and another for semantic guidelines), call the `validate_multiple_urls_with_two_documents` tool to check compliance against both guidelines.
+    17. If the user provides a Sitemap URL + 2 Document IDs (SEO + Semantic), fetch ALL URLs from the sitemap and call `validate_sitemap_with_two_documents` 
     """
 
 welcome_message = """👋 **Welcome to your Personal SEO Assistant!**
@@ -157,6 +154,7 @@ def multiply(a: float, b: float) -> float:
         The product of a and b
     """
     global chat_system
+    
     chat_system = "Tool call - Multiply"
     return a * b
 
@@ -648,7 +646,7 @@ def validate_sitemap_with_two_documents(sitemap_url: str, seo_doc_id: str, seman
         # Step 1: Load all URLs from sitemap
         loader = SitemapLoader(web_path=sitemap_url, continue_on_failure=True)
         documents = loader.load()
-
+        
         linkurls = []
         for doc in documents[:5]:
             url = doc.metadata.get("loc")
@@ -662,6 +660,8 @@ def validate_sitemap_with_two_documents(sitemap_url: str, seo_doc_id: str, seman
 
         # Step 2: Validate each URL
         results = []
+
+       
         print("linkurls",linkurls)
         for u in linkurls:
             result_json = validate_url_with_two_documents.invoke({"url": u,"seo_doc_id": seo_doc_id,"semantic_doc_id": semantic_doc_id})
@@ -1196,27 +1196,8 @@ def sitemap_stream_static_message(message):
         if word.endswith('\n') or word.endswith('**') or word.endswith('!'):
             time.sleep(0.1)
     try:
-        pdf_id = str(uuid.uuid4())
-        pdf_filename = f"chat_output_{pdf_id}.pdf"
-        pdf_path = os.path.join("documents", pdf_filename)
-        os.makedirs("documents", exist_ok=True)
 
-        doc = SimpleDocTemplate(pdf_path)
-        styles = getSampleStyleSheet()
-        story = []
-
-        story.append(Paragraph("<b>SEO + Semantic Guideline Validation Report</b>", styles["Heading1"]))
-        story.append(Spacer(1, 12))
-        story.append(Paragraph(message.replace("\n", "<br/>"), styles["Normal"]))
-
-        doc.build(story)
-
-        uploaded_documents[pdf_id] = {
-            "file_name": pdf_filename,
-            "file_path": pdf_path,
-            "uploaded_at": datetime.datetime.utcnow().isoformat()
-        }
-
+        pdf_id = pdfgenrateprocess(message)
         # Yield a final chunk with PDF link
         yield f"\n\n📄 Response saved in PDF: <a href='{APP_URL}documents/{pdf_id}'>Click here to view the detailed report</a>\n"
 
@@ -1284,31 +1265,11 @@ def build_stream_response(llm_with_tools, messages, ai_msg, session_id, chat_sys
                 session, create = get_or_create_chat_session(session_id, run_id,None,False,chat_system)
 
             # === PDF GENERATION: Save entire final_response_content ===
-            if chat_system in [
-                "Tool call - URL + Two Documents Validation (one for SEO guidelines and another for semantic guidelines)",
-                "Tool call - Multiple URLs + Two Documents Validation (SEO + Semantic guidelines)","Tool call - Sitemap URL + Two Documents Validation (SEO + Semantic guidelines)"
-            ]:
+            if chat_system in ["Tool call - URL + Two Documents Validation (one for SEO guidelines and another for semantic guidelines)","Tool call - Multiple URLs + Two Documents Validation (SEO + Semantic guidelines)","Tool call - Sitemap URL + Two Documents Validation (SEO + Semantic guidelines)","Tool call - SEO URL Parser","Tool call - URL + SEO Document Validation","Tool call - URL + Semantic Document Validation"]:
                 try:
-                    pdf_id = str(uuid.uuid4())
-                    pdf_filename = f"chat_output_{pdf_id}.pdf"
-                    pdf_path = os.path.join("documents", pdf_filename)
-                    os.makedirs("documents", exist_ok=True)
 
-                    doc = SimpleDocTemplate(pdf_path)
-                    styles = getSampleStyleSheet()
-                    story = []
-
-                    story.append(Paragraph("<b>SEO + Semantic Guideline Validation Report</b>", styles["Heading1"]))
-                    story.append(Spacer(1, 12))
-                    story.append(Paragraph(final_response_content.replace("\n", "<br/>"), styles["Normal"]))
-
-                    doc.build(story)
-
-                    uploaded_documents[pdf_id] = {
-                        "file_name": pdf_filename,
-                        "file_path": pdf_path,
-                        "uploaded_at": datetime.datetime.utcnow().isoformat()
-                    }
+                    pdf_id = pdfgenrateprocess(final_response_content)
+                    
 
                     # Yield a final chunk with PDF link
                     yield f"\n\n📄 Response saved in PDF: <a href='{APP_URL}documents/{pdf_id}'>Click here to view the detailed report</a>\n"
@@ -1696,3 +1657,41 @@ def is_valid_url(url: str) -> bool:
         return response.status_code == 200
     except requests.RequestException:
         return False
+    
+def pdfgenrateprocess(message: str) -> str:
+    pdf_id = str(uuid.uuid4())
+    pdf_filename = f"chat_output_{pdf_id}.pdf"
+    pdf_path = os.path.join("documents", pdf_filename)
+    os.makedirs("documents", exist_ok=True)
+
+    doc = SimpleDocTemplate(pdf_path)
+    styles = getSampleStyleSheet()
+    story = []
+
+    story.append(Paragraph("<b>SEO + Semantic Guideline Validation Report</b>", styles["Heading1"]))
+    story.append(Spacer(1, 12))
+    
+    # Split by your delimiter
+    sections = message.split("++++ ++++ ++++ ++++ ++++")
+
+    for i, section in enumerate(sections):
+        if section.strip():
+            # Split each section into lines
+            lines = section.strip().split("\n")
+            for line in lines:
+                if line.strip():
+                    story.append(Paragraph(line.strip(), styles["Normal"]))
+                    story.append(Spacer(1, 6))  # small gap between lines
+
+            # Add page break after each section except the last
+            if i < len(sections) - 1:
+                story.append(PageBreak())
+
+    doc.build(story)
+
+    uploaded_documents[pdf_id] = {
+        "file_name": pdf_filename,
+        "file_path": pdf_path,
+        "uploaded_at": datetime.datetime.utcnow().isoformat()
+    }
+    return pdf_id
