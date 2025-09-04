@@ -1011,7 +1011,81 @@ def chatbot_input(request):
                             user_name_status[session_id]['name_validated'] = True
                             user_name_status[session_id]['name'] = tool_args.get('name', '')
                         
+                        sitemap_response = ''
+
+                        # Sitemap Tool One by One URL Response
+                        if chat_system == "Tool call - Sitemap URL + Two Documents Validation (SEO + Semantic guidelines)":
+                            tool_result_dict = json.loads(tool_result)  # parse JSON string → dict
+                            xcount = 0
+                            lenusername = 0
+                            for result_sitemap  in tool_result_dict['results']:
+                                if xcount == 0:
+                                    messages.append(
+                                        ToolMessage(content=str(result_sitemap), tool_call_id=tool_call_id)
+                                    )
+                                else:
+                                    messages.append(
+                                        HumanMessage(content=json.dumps(result_sitemap))
+                                    )
+                                sitemap_response2 = sitemap_build_stream_response(llm_with_tools, messages, ai_msg, session_id, chat_system, count)
+                                messages.append(
+                                    AIMessage(content=sitemap_response2)
+                                )
+
+                                sitemap_response += sitemap_response2
+                                xcount = xcount + 1
+                                lenusername =  len(json.dumps(result_sitemap))
+
+                            total_tokens = lenusername + len(sitemap_response.split())
+                            tokenresponse[session_id].update({
+                                'total_tokens': total_tokens,
+                                'input_tokens': lenusername,
+                                'output_tokens': len(sitemap_response.split()),
+                                'response_type': 'Tool Usage',
+                                'tools_used': True,
+                                'source': chat_system,
+                                'run_id': generate_message_id()
+                            })    
+                            messagedata[session_id].append({
+                                "message_type": "tool",
+                                "content": str(tool_result),
+                                "message_id": generate_message_id(),
+                                "tool_calls": ai_msg.tool_calls,
+                                "tool_call_id": tool_call_id,
+                                "count": count,
+                                "response_type": '',
+                                "tools_used": '',
+                                "source": '',
+                                "input_tokens": 0,
+                                "output_tokens": 0,
+                                "total_tokens": 0
+                            })
+                            messagedata[session_id].append({
+                                "message_type": "ai",
+                                "content": sitemap_response,
+                                "message_id": generate_message_id(),
+                                "tool_calls": '',
+                                "tool_call_id": '',
+                                "count": count,
+                                "response_type": 'Tool Usage',
+                                "tools_used": True,
+                                "source": chat_system,
+                                "input_tokens": lenusername,
+                                "output_tokens": len(sitemap_response.split()),
+                                "total_tokens": total_tokens
+                            })
+
+                            # Save to database
+                            session, created = get_or_create_chat_session(session_id, generate_run_id(), None, False, chat_system)
+                            save_message_to_db(session, messagedata, generate_run_id(), count)
+                            
+                            return StreamingHttpResponse(
+                                sitemap_stream_static_message(sitemap_response),
+                                content_type='text/plain'
+                            )    
+                        
                         # Append ToolMessage with matching tool_call_id
+                        
                         messages.append(
                             ToolMessage(content=str(tool_result), tool_call_id=tool_call_id)
                         )
@@ -1109,7 +1183,59 @@ def stream_static_message(message):
         # Add pauses at line breaks for better effect
         if word.endswith('\n') or word.endswith('**') or word.endswith('!'):
             time.sleep(0.1)
+
+def sitemap_stream_static_message(message):
+    """Stream a static message with typing effect"""
+    words = message.split(' ')
     
+    for word in words:
+        time.sleep(0.05)  # Typing effect
+        yield word + " "
+        
+        # Add pauses at line breaks for better effect
+        if word.endswith('\n') or word.endswith('**') or word.endswith('!'):
+            time.sleep(0.1)
+    try:
+        pdf_id = str(uuid.uuid4())
+        pdf_filename = f"chat_output_{pdf_id}.pdf"
+        pdf_path = os.path.join("documents", pdf_filename)
+        os.makedirs("documents", exist_ok=True)
+
+        doc = SimpleDocTemplate(pdf_path)
+        styles = getSampleStyleSheet()
+        story = []
+
+        story.append(Paragraph("<b>SEO + Semantic Guideline Validation Report</b>", styles["Heading1"]))
+        story.append(Spacer(1, 12))
+        story.append(Paragraph(message.replace("\n", "<br/>"), styles["Normal"]))
+
+        doc.build(story)
+
+        uploaded_documents[pdf_id] = {
+            "file_name": pdf_filename,
+            "file_path": pdf_path,
+            "uploaded_at": datetime.datetime.utcnow().isoformat()
+        }
+
+        # Yield a final chunk with PDF link
+        yield f"\n\n📄 Response saved in PDF: <a href='{APP_URL}documents/{pdf_id}'>Click here to view the detailed report</a>\n"
+
+    except Exception as e:
+        yield f"\n[PDF generation failed: {str(e)}]"
+    
+def sitemap_build_stream_response(llm_with_tools, messages, ai_msg, session_id, chat_system, count):
+    """Unified streaming response generator with token usage tracking"""
+    try:
+        final_response_content = ""
+
+        for chunk in llm_with_tools.stream(messages):
+            if isinstance(chunk, AIMessageChunk) and chunk.content:
+                final_response_content += chunk.content
+                run_id = chunk.id
+        return final_response_content+"++++ ++++ ++++ ++++ ++++"               
+    except (OpenAIError, APITimeoutError) as e:
+        return f"\n[Error occurred: {str(e)}]"
+
 def build_stream_response(llm_with_tools, messages, ai_msg, session_id, chat_system, count):
     """Unified streaming response generator with token usage tracking"""
     try:
