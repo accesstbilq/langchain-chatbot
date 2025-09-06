@@ -64,7 +64,6 @@ def chathistory(request):
 # -------------------------------
 def document_view(request):
     """Render document upload page."""
-    print(uploaded_documents)
     return render(request, 'document.html')
 
 
@@ -158,19 +157,28 @@ def list_documents(request):
     if request.method != 'GET':
         return JsonResponse({'success': False, 'error': 'Only GET requests allowed'})
     
+    session_id = request.GET.get('session_id', None)
+
     documents_list = []
-    for doc_id, doc_info in uploaded_documents.items():
-        documents_list.append({
-            'id': doc_id,
-            'name': doc_info['original_name'],
-            'size': doc_info['size'],
-            'type': doc_info['file_type'],
-            'upload_date': doc_info['upload_date'],
-            'mime_type': doc_info['mime_type']
-        })
-    
-    # Sort by upload date (newest first)
-    documents_list.sort(key=lambda x: x['upload_date'], reverse=True)
+    if uploaded_documents:
+        for doc_id, doc_info in uploaded_documents.items():
+
+            # Filter by session if specified
+            if session_id and doc_info.get('session_id') != session_id:
+                continue
+
+            documents_list.append({
+                'id': doc_id,
+                'name': doc_info['original_name'],
+                'size': doc_info['size'],
+                'type': doc_info['file_type'],
+                'upload_date': doc_info['upload_date'],
+                'mime_type': doc_info['mime_type']
+            })
+            
+        
+        # Sort by upload date (newest first)
+        documents_list.sort(key=lambda x: x['upload_date'], reverse=True)
     
     return JsonResponse({
         'success': True,
@@ -262,6 +270,11 @@ def download_document(request, doc_id):
     file_path = file_info["file_path"]
     
     try:
-        return FileResponse(open(file_path, "rb"), as_attachment=True, filename=file_info["file_name"])
+        response = FileResponse(open(file_path, "rb"), as_attachment=True, filename=file_info["file_name"])
+        
+        # Remove this document after preparing response
+        del uploaded_documents[doc_id]
+
+        return response
     except FileNotFoundError:
         raise Http404("File not found on server")

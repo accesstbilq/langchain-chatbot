@@ -641,174 +641,53 @@ def validate_multiple_urls_with_two_documents(urls: list, seo_doc_id: str, seman
         }, indent=2)
 
 @tool
-def validate_sitemap_with_two_documents(sitemap_url: str, seo_doc_id: str, semantic_doc_id: str, session_id: str, tool_call_id: str, count: int = 0) -> str:
+def validate_sitemap_with_two_documents(sitemap_url: str, seo_doc_id: str, semantic_doc_id: str, session_id: str, tool_call_id:str, count: int = 0) -> str:
     """
     Validate and parse Sitemap URL, then compare results against SEO and Semantic guideline documents.
-    This version includes runtime status messages that stream to the chatbot interface.
 
     Args:
         sitemap_url: The sitemap URL to fetch all links
         seo_doc_id: Document ID for SEO guideline
         semantic_doc_id: Document ID for Semantic guideline
-        session_id: Current chat session ID
-        tool_call_id: Tool call identifier
-        count: Message count
 
     Returns:
         JSON string with compliance results + parsed SEO analysis for each URL
     """
     global chat_system, messages
-    
-    def stream_status_update(message):
-        """Helper function to stream status updates to the frontend"""
-        # This would need to be connected to your streaming mechanism
-        # For now, we'll add the status to the response
-        print(f"🔄 {message}")  # This will show in console
-        return f"🔄 {message}\n"
-    
     try:
-        status_updates = []
-        
-        # Step 1: Initial validation
-        status_updates.append(stream_status_update("🗺️ Fetching sitemap contents..."))
-        chat_system = "Tool call - Sitemap URL + Two Documents Validation (SEO + Semantic guidelines)"
         
         # Load chat history for this session
-        if session_id in chat_history:
-            messages = chat_history[session_id].copy()
+        messages = chat_history[session_id].copy()
         
-        # Step 2: Load all URLs from sitemap
-        status_updates.append(stream_status_update("🔗 Extracting all valid URLs..."))
+        # Step 1: Load all URLs from sitemap
         loader = SitemapLoader(web_path=sitemap_url, continue_on_failure=True)
         documents = loader.load()
         
         linkurls = []
-        for doc in documents[:5]:  # Limit to first 5 URLs for demo
+        for doc in documents[:5]:
             url = doc.metadata.get("loc")
             if url and is_valid_url(url):
                 linkurls.append(url)
-
-        if not linkurls:
-            return json.dumps({
-                "success": False, 
-                "error": "No valid URLs found in sitemap",
-                "status_updates": status_updates
-            }, indent=2)
-
-        # Step 3: Load guideline documents
-        status_updates.append(stream_status_update("📚 Loading SEO and Semantic guidelines..."))
-        
-        # Validate documents exist
-        if seo_doc_id not in uploaded_documents:
-            return json.dumps({
-                "success": False, 
-                "error": f"SEO document {seo_doc_id} not found",
-                "status_updates": status_updates
-            }, indent=2)
-        
-        if semantic_doc_id not in uploaded_documents:
-            return json.dumps({
-                "success": False, 
-                "error": f"Semantic document {semantic_doc_id} not found",
-                "status_updates": status_updates
-            }, indent=2)
-
-        # Step 4: Process each URL
-        status_updates.append(stream_status_update("📄 Processing each page systematically..."))
-        results = []
-
-        for i, url in enumerate(linkurls, 1):
-            status_updates.append(stream_status_update(f"📊 Analyzing URL {i}/{len(linkurls)}: {url[:50]}..."))
-            
-            try:
-                result_json = validate_url_with_two_documents.invoke({
-                    "url": url,
-                    "seo_doc_id": seo_doc_id,
-                    "semantic_doc_id": semantic_doc_id
-                })
-                results.append(json.loads(result_json))
-            except Exception as url_error:
-                results.append({
-                    "url": url,
-                    "success": False,
-                    "error": f"Validation failed for {url}: {str(url_error)}"
-                })
-
-        # Step 5: Finalize report
-        status_updates.append(stream_status_update("📊 Creating site-wide compliance report..."))
-        status_updates.append(stream_status_update("✨ Analysis complete! Generating response..."))
-
-        # Step 6: Build structured response
-        final_result = {
-            "success": True,
-            "sitemap_url": sitemap_url,
-            "total_urls": len(linkurls),
-            "results": results,
-            "status_updates": status_updates,
-            "processing_summary": {
-                "urls_found": len(documents),
-                "urls_processed": len(linkurls),
-                "successful_validations": len([r for r in results if r.get("success", True)]),
-                "failed_validations": len([r for r in results if not r.get("success", True)])
-            }
-        }
-        
-        return json.dumps(final_result, indent=2, ensure_ascii=False)
-        
-    except Exception as e:
-        error_result = {
-            "success": False, 
-            "error": f"Sitemap validation failed: {str(e)}",
-            "status_updates": status_updates if 'status_updates' in locals() else []
-        }
-        return json.dumps(error_result, indent=2)
-    
-
-# def validate_sitemap_with_two_documents(sitemap_url: str, seo_doc_id: str, semantic_doc_id: str, session_id: str, tool_call_id:str, count: int = 0) -> str:
-#     """
-#     Validate and parse Sitemap URL, then compare results against SEO and Semantic guideline documents.
-
-#     Args:
-#         sitemap_url: The sitemap URL to fetch all links
-#         seo_doc_id: Document ID for SEO guideline
-#         semantic_doc_id: Document ID for Semantic guideline
-
-#     Returns:
-#         JSON string with compliance results + parsed SEO analysis for each URL
-#     """
-#     global chat_system, messages
-#     try:
-        
-#         # Load chat history for this session
-#         messages = chat_history[session_id].copy()
-        
-#         # Step 1: Load all URLs from sitemap
-#         loader = SitemapLoader(web_path=sitemap_url, continue_on_failure=True)
-#         documents = loader.load()
-        
-#         linkurls = []
-#         for doc in documents[:5]:
-#             url = doc.metadata.get("loc")
-#             if url and is_valid_url(url):
-#                 linkurls.append(url)
  
 
-#         # urls = [doc.metadata["source"] for doc in documents]
-#         if not linkurls:
-#             return json.dumps({"success": False, "error": "No URLs found in sitemap"}, indent=2)
+        # urls = [doc.metadata["source"] for doc in documents]
+        if not linkurls:
+            return json.dumps({"success": False, "error": "No URLs found in sitemap"}, indent=2)
 
-#         # Step 2: Validate each URL
-#         results = []
+        # Step 2: Validate each URL
+        results = []
 
-#         for u in linkurls:
-#             result_json = validate_url_with_two_documents.invoke({"url": u,"seo_doc_id": seo_doc_id,"semantic_doc_id": semantic_doc_id})
-#             results.append(json.loads(result_json))
-#         chat_system = "Tool call - Sitemap URL + Two Documents Validation (SEO + Semantic guidelines)"
+       
+        print("linkurls",linkurls)
+        for u in linkurls:
+            result_json = validate_url_with_two_documents.invoke({"url": u,"seo_doc_id": seo_doc_id,"semantic_doc_id": semantic_doc_id})
+            results.append(json.loads(result_json))
+        chat_system = "Tool call - Sitemap URL + Two Documents Validation (SEO + Semantic guidelines)"
 
-#         # Step 3: Build structured response
-#         return json.dumps({"success": True,  "sitemap_url": sitemap_url, "total_urls": len(linkurls), "results": results}, indent=2, ensure_ascii=False)
-#     except Exception as e:
-#         return json.dumps({"success": False, "error": f"Sitemap validation failed: {str(e)}"}, indent=2)
+        # Step 3: Build structured response
+        return json.dumps({"success": True,  "sitemap_url": sitemap_url, "total_urls": len(linkurls), "results": results}, indent=2, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"success": False, "error": f"Sitemap validation failed: {str(e)}"}, indent=2)
     
     
 # =============================
