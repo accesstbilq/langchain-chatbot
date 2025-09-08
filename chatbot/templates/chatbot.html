@@ -104,72 +104,82 @@
                     .join('');
             }
 
-            
-                            
-            // Original sendMessage function (preserved and enhanced)
-            function sendMessage() {
+            // Enhanced: hide loader AFTER metadata returns; robust in all branches
+            async function sendMessage() {
                 const userInput = $('#user-input').val().trim();
-                if (!userInput) return; // prevent empty messages
+                if (!userInput) return;
 
-                let result = "";
+                const chatBox = document.getElementById('chat-box'); // ✅ use the same target everywhere
                 const decoder = new TextDecoder();
 
                 // Append user message
-                $('#chat-box').append('<div class="message user">You: ' + userInput + '</div>');
-                scrollToBottom();   // ✅ scroll immediately after adding user message
+                $('#chat-box').append('<div class="message user">You: ' + $('<div>').text(userInput).html() + '</div>');
+                scrollToBottom();
 
                 $('#user-input').val('');
                 $('#loader').show();
 
                 // Create bot message container
-                const agentChatDiv = document.createElement("div");
-                agentChatDiv.className = "message bot";
-                document.querySelector(".chat-box").appendChild(agentChatDiv);
-                scrollToBottom();   // ✅ make sure bot container is visible too
+                const agentChatDiv = document.createElement('div');
+                agentChatDiv.className = 'message bot';
+                chatBox.appendChild(agentChatDiv);
+                scrollToBottom();
 
-                fetch('/chat-input/', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ message: userInput, session_id: sessionId })
-                }).then(response => {
-                    const reader = response.body.getReader();
-                    function read() {
-                        reader.read().then(({ done, value }) => {
-                            if (done) {
-                                // fetch token usage when done
-                                if (sessionId) {
-                                    $.get(`/get-token-usage/${sessionId}/`, function(data) {
-                                        let metadataHtml = `
-                                            <p>Response Type: ${data.response_type}</p>
-                                            <p>Source: ${data.source}</p>
-                                            <p>Total Tokens: ${data.total_tokens}</p>
-                                            <p>Input Tokens: ${data.input_tokens}</p>
-                                            <p>Output Tokens: ${data.output_tokens}</p>
-                                            <p>Session Id: ${data.session}</p>
-                                            <p>Run Id: ${data.run_id}</p>
-                                        `;
-                                        $('.metadata').html(metadataHtml);
-                                    }).fail(err => {
-                                        console.error("Failed to fetch token usage", err);
-                                    });
-                                }
-                                return;
-                            }
+                try {
+                    const resp = await fetch('/chat-input/', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ message: userInput, session_id: sessionId })
+                    });
 
-                            const chunk = decoder.decode(value, { stream: true });
-                            result += chunk;
-                            agentChatDiv.innerHTML += chunk.replace(/\n/g, "<br>");
-                            scrollToBottom();   // ✅ keep scrolling while streaming
-                            read();
-                        });
+                    if (!resp.ok || !resp.body) {
+                        throw new Error(`HTTP ${resp.status}`);
                     }
-                    read();
-                }).catch(error => {
-                    $('#chat-box').append('<div class="message bot">❌ Error: ' + error.message + '</div>');
-                    scrollToBottom();  // ✅ make sure error is visible
-                }).finally(() => {
-                    $('#loader').hide();
-                });
+
+                    const reader = resp.body.getReader();
+                    let result = '';
+
+                    // Stream loop
+                    while (true) {
+                        const { done, value } = await reader.read();
+                        if (done) break;
+
+                        const chunk = decoder.decode(value, { stream: true });
+                        result += chunk;
+                        agentChatDiv.innerHTML += chunk.replace(/\n/g, '<br>');
+                        scrollToBottom();
+                    }
+
+                    // ✅ Only hide loader after metadata finishes (if we fetch it)
+                    if (sessionId) {
+                        try {
+                            const metaResp = await fetch(`/get-token-usage/${sessionId}/`);
+                            if (!metaResp.ok) throw new Error(`HTTP ${metaResp.status}`);
+                            const data = await metaResp.json();
+
+                            const metadataHtml = `
+                                <p>Response Type: ${data.response_type ?? ''}</p>
+                                <p>Source: ${data.source ?? ''}</p>
+                                <p>Total Tokens: ${data.total_tokens ?? ''}</p>
+                                <p>Input Tokens: ${data.input_tokens ?? ''}</p>
+                                <p>Output Tokens: ${data.output_tokens ?? ''}</p>
+                                <p>Session Id: ${data.session ?? ''}</p>
+                                <p>Run Id: ${data.run_id ?? ''}</p>
+                            `;
+                            $('.metadata').html(metadataHtml);
+                        } catch (e) {
+                            console.error('Failed to fetch token usage', e);
+                        } finally {
+                            $('#loader').hide(); // hide after metadata attempt completes
+                        }
+                    } else {
+                        $('#loader').hide(); // no metadata to fetch
+                    }
+                } catch (error) {
+                    $('#chat-box').append('<div class="message bot">❌ Error: ' + $('<div>').text(error.message).html() + '</div>');
+                    scrollToBottom();
+                    $('#loader').hide(); // make sure loader never gets stuck
+                }
             }
         </script>
     </body>

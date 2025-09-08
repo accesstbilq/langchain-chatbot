@@ -664,14 +664,13 @@ def validate_sitemap_with_two_documents(sitemap_url: str, seo_doc_id: str, seman
         # This would need to be connected to your streaming mechanism
         # For now, we'll add the status to the response
         print(f"🔄 {message}")  # This will show in console
-        return f"🔄 {message}\n"
+        return f"{message}\n"
     
     try:
         status_updates = []
         
         # Step 1: Initial validation
         status_updates.append(stream_status_update("🗺️ Fetching sitemap contents..."))
-        chat_system = "Tool call - Sitemap URL + Two Documents Validation (SEO + Semantic guidelines)"
         
         # Load chat history for this session
         if session_id in chat_history:
@@ -717,34 +716,35 @@ def validate_sitemap_with_two_documents(sitemap_url: str, seo_doc_id: str, seman
         status_updates.append(stream_status_update("📄 Processing each page systematically..."))
         results = []
 
-        for i, url in enumerate(linkurls, 1):
-            status_updates.append(stream_status_update(f"📊 Analyzing URL {i}/{len(linkurls)}: {url[:50]}..."))
+        # for i, url in enumerate(linkurls, 1):
+        #     status_updates.append(stream_status_update(f"📊 Analyzing URL {i}/{len(linkurls)}: {url}"))
             
-            try:
-                result_json = validate_url_with_two_documents.invoke({
-                    "url": url,
-                    "seo_doc_id": seo_doc_id,
-                    "semantic_doc_id": semantic_doc_id
-                })
-                results.append(json.loads(result_json))
-            except Exception as url_error:
-                results.append({
-                    "url": url,
-                    "success": False,
-                    "error": f"Validation failed for {url}: {str(url_error)}"
-                })
+        #     try:
+        #         result_json = validate_url_with_two_documents.invoke({
+        #             "url": url,
+        #             "seo_doc_id": seo_doc_id,
+        #             "semantic_doc_id": semantic_doc_id
+        #         })
+        #         results.append(json.loads(result_json))
+        #     except Exception as url_error:
+        #         results.append({
+        #             "url": url,
+        #             "success": False,
+        #             "error": f"Validation failed for {url}: {str(url_error)}"
+        #         })
 
-        # Step 5: Finalize report
-        status_updates.append(stream_status_update("📊 Creating site-wide compliance report..."))
-        status_updates.append(stream_status_update("✨ Analysis complete! Generating response..."))
-
+        # # Step 5: Finalize report
+        # status_updates.append(stream_status_update("📊 Creating site-wide compliance report..."))
+        # status_updates.append(stream_status_update("✨ Analysis complete! Generating response..."))
+        chat_system = "Tool call - Sitemap URL + Two Documents Validation (SEO + Semantic guidelines)"
         # Step 6: Build structured response
         final_result = {
             "success": True,
             "sitemap_url": sitemap_url,
             "total_urls": len(linkurls),
-            "results": results,
-            "status_updates": status_updates,
+            "seo_doc_id":seo_doc_id,
+            "semantic_doc_id":semantic_doc_id,
+            "results": linkurls,
             "processing_summary": {
                 "urls_found": len(documents),
                 "urls_processed": len(linkurls),
@@ -762,54 +762,6 @@ def validate_sitemap_with_two_documents(sitemap_url: str, seo_doc_id: str, seman
             "status_updates": status_updates if 'status_updates' in locals() else []
         }
         return json.dumps(error_result, indent=2)
-    
-
-# def validate_sitemap_with_two_documents(sitemap_url: str, seo_doc_id: str, semantic_doc_id: str, session_id: str, tool_call_id:str, count: int = 0) -> str:
-#     """
-#     Validate and parse Sitemap URL, then compare results against SEO and Semantic guideline documents.
-
-#     Args:
-#         sitemap_url: The sitemap URL to fetch all links
-#         seo_doc_id: Document ID for SEO guideline
-#         semantic_doc_id: Document ID for Semantic guideline
-
-#     Returns:
-#         JSON string with compliance results + parsed SEO analysis for each URL
-#     """
-#     global chat_system, messages
-#     try:
-        
-#         # Load chat history for this session
-#         messages = chat_history[session_id].copy()
-        
-#         # Step 1: Load all URLs from sitemap
-#         loader = SitemapLoader(web_path=sitemap_url, continue_on_failure=True)
-#         documents = loader.load()
-        
-#         linkurls = []
-#         for doc in documents[:5]:
-#             url = doc.metadata.get("loc")
-#             if url and is_valid_url(url):
-#                 linkurls.append(url)
- 
-
-#         # urls = [doc.metadata["source"] for doc in documents]
-#         if not linkurls:
-#             return json.dumps({"success": False, "error": "No URLs found in sitemap"}, indent=2)
-
-#         # Step 2: Validate each URL
-#         results = []
-
-#         for u in linkurls:
-#             result_json = validate_url_with_two_documents.invoke({"url": u,"seo_doc_id": seo_doc_id,"semantic_doc_id": semantic_doc_id})
-#             results.append(json.loads(result_json))
-#         chat_system = "Tool call - Sitemap URL + Two Documents Validation (SEO + Semantic guidelines)"
-
-#         # Step 3: Build structured response
-#         return json.dumps({"success": True,  "sitemap_url": sitemap_url, "total_urls": len(linkurls), "results": results}, indent=2, ensure_ascii=False)
-#     except Exception as e:
-#         return json.dumps({"success": False, "error": f"Sitemap validation failed: {str(e)}"}, indent=2)
-    
     
 # =============================
 # Simple Views (Frontend Pages)
@@ -1147,76 +1099,12 @@ def chatbot_input(request):
                             user_name_status[session_id]['name_validated'] = True
                             user_name_status[session_id]['name'] = tool_args.get('name', '')
                         
-                        sitemap_response = ''
+                        
 
                         # Sitemap Tool One by One URL Response
                         if chat_system == "Tool call - Sitemap URL + Two Documents Validation (SEO + Semantic guidelines)":
-                            tool_result_dict = json.loads(tool_result)  # parse JSON string → dict
-                            xcount = 0
-                            lenusername = 0
-                            for result_sitemap  in tool_result_dict['results']:
-                                if xcount == 0:
-                                    messages.append(
-                                        ToolMessage(content=str(result_sitemap), tool_call_id=tool_call_id)
-                                    )
-                                else:
-                                    messages.append(
-                                        HumanMessage(content=json.dumps(result_sitemap))
-                                    )
-                                sitemap_response2 = sitemap_build_stream_response(llm_with_tools, messages, ai_msg, session_id, chat_system, count)
-                                messages.append(
-                                    AIMessage(content=sitemap_response2)
-                                )
-
-                                sitemap_response += sitemap_response2
-                                xcount = xcount + 1
-                                lenusername =  len(json.dumps(result_sitemap))
-
-                            total_tokens = lenusername + len(sitemap_response.split())
-                            tokenresponse[session_id].update({
-                                'total_tokens': total_tokens,
-                                'input_tokens': lenusername,
-                                'output_tokens': len(sitemap_response.split()),
-                                'response_type': 'Tool Usage',
-                                'tools_used': True,
-                                'source': chat_system,
-                                'run_id': generate_message_id()
-                            })    
-                            messagedata[session_id].append({
-                                "message_type": "tool",
-                                "content": str(tool_result),
-                                "message_id": generate_message_id(),
-                                "tool_calls": ai_msg.tool_calls,
-                                "tool_call_id": tool_call_id,
-                                "count": count,
-                                "response_type": '',
-                                "tools_used": '',
-                                "source": '',
-                                "input_tokens": 0,
-                                "output_tokens": 0,
-                                "total_tokens": 0
-                            })
-                            messagedata[session_id].append({
-                                "message_type": "ai",
-                                "content": sitemap_response,
-                                "message_id": generate_message_id(),
-                                "tool_calls": '',
-                                "tool_call_id": '',
-                                "count": count,
-                                "response_type": 'Tool Usage',
-                                "tools_used": True,
-                                "source": chat_system,
-                                "input_tokens": lenusername,
-                                "output_tokens": len(sitemap_response.split()),
-                                "total_tokens": total_tokens
-                            })
-
-                            # Save to database
-                            session, created = get_or_create_chat_session(session_id, generate_run_id(), None, False, chat_system)
-                            save_message_to_db(session, messagedata, generate_run_id(), count)
-                            
                             return StreamingHttpResponse(
-                                sitemap_stream_static_message(sitemap_response,chat_system),
+                                sitemap_stream_static_message(llm_with_tools, tool_result, ai_msg, session_id, chat_system, count,tool_call_id,messages),
                                 content_type='text/plain'
                             )    
                         
@@ -1337,32 +1225,104 @@ def stream_static_message(message):
         if word.endswith('\n') or word.endswith('**') or word.endswith('!'):
             time.sleep(0.1)
 
-def sitemap_stream_static_message(message,chat_system):
+def sitemap_stream_static_message(llm_with_tools, tool_result, ai_msg, session_id, chat_system, count,tool_call_id,messages):
     """Stream a static message with typing effect"""
-    runtime_messages = {
-        "Tool call - Sitemap URL + Two Documents Validation (SEO + Semantic guidelines)": [
-            "🗺️ Fetching sitemap contents...",
-            "🔗 Extracting all valid URLs...",
-            "📚 Loading SEO and Semantic guidelines...",
-            "🔄 Processing each page systematically...",
-            "📊 Creating site-wide compliance report..."
-        ]
-    }
+    sitemap_response = ''
+    yield yield_runtime_status("🗺️ Fetching sitemap contents...", 0.3)
+    yield yield_runtime_status("🔗 Extracting all valid URLs...", 0.8)
+    yield yield_runtime_status("📚 Loading SEO and Semantic guidelines...", 0.8)
+    yield yield_runtime_status("📄 Processing each page systematically...", 0.8)
+    tool_result_dict = json.loads(tool_result)
+    xcount = 0
+    lenusername = 0
+    linkurls = tool_result_dict['results']
+    seo_doc_id = tool_result_dict['seo_doc_id']
+    semantic_doc_id = tool_result_dict['semantic_doc_id']
 
-    # Get runtime messages for current tool
-    status_messages = runtime_messages.get(chat_system, ["🔄 Processing your request..."])
-    
-    # Yield runtime status messages
-    for i, status_msg in enumerate(status_messages):
-        yield yield_runtime_status(status_msg, 5)
-    
-    # Add completion message
+    results = []
+    for i, url in enumerate(linkurls, 1):
+        yield yield_runtime_status(f"📊 Analyzing URL {i}/{len(linkurls)}: {url}", 0.3)
+        try:
+            result_json = validate_url_with_two_documents.invoke({
+                "url": url,
+                "seo_doc_id": seo_doc_id,
+                "semantic_doc_id": semantic_doc_id
+            })
+            results.append(json.loads(result_json))
+
+            result_sitemap = json.loads(result_json)
+            if xcount == 0:
+                messages.append(
+                    ToolMessage(content=str(result_sitemap), tool_call_id=tool_call_id)
+                )
+            else:
+                messages.append(
+                    HumanMessage(content=json.dumps(result_sitemap))
+                )
+            sitemap_response2 = sitemap_build_stream_response(llm_with_tools, messages, ai_msg, session_id, chat_system, count)
+            messages.append(
+                AIMessage(content=sitemap_response2)
+            )
+            sitemap_response += sitemap_response2
+            xcount = xcount + 1
+            lenusername =  len(json.dumps(result_sitemap))
+
+
+        except Exception as url_error:
+            results.append({
+                "url": url,
+                "success": False,
+                "error": f"Validation failed for {url}: {str(url_error)}"
+            })
+
+    total_tokens = lenusername + len(sitemap_response.split())
+    yield yield_runtime_status("📊 Creating site-wide compliance report...", 0.3)
+
+    tokenresponse[session_id].update({
+        'total_tokens': total_tokens,
+        'input_tokens': lenusername,
+        'output_tokens': len(sitemap_response.split()),
+        'response_type': 'Tool Usage',
+        'tools_used': True,
+        'source': chat_system,
+        'run_id': generate_message_id()
+    })    
+    messagedata[session_id].append({
+        "message_type": "tool",
+        "content": str(tool_result),
+        "message_id": generate_message_id(),
+        "tool_calls": ai_msg.tool_calls,
+        "tool_call_id": tool_call_id,
+        "count": count,
+        "response_type": '',
+        "tools_used": '',
+        "source": '',
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0
+    })
+    messagedata[session_id].append({
+        "message_type": "ai",
+        "content": sitemap_response,
+        "message_id": generate_message_id(),
+        "tool_calls": '',
+        "tool_call_id": '',
+        "count": count,
+        "response_type": 'Tool Usage',
+        "tools_used": True,
+        "source": chat_system,
+        "input_tokens": lenusername,
+        "output_tokens": len(sitemap_response.split()),
+        "total_tokens": total_tokens
+    })
     yield yield_runtime_status("✨ Analysis complete! Generating response...", 0.3)
-    yield "\n"
+    # Save to database
+    session, created = get_or_create_chat_session(session_id, generate_run_id(), None, False, chat_system)
+    save_message_to_db(session, messagedata, generate_run_id(), count)
 
     try:
         yield yield_runtime_status("📄 Generating PDF report...", 0.3)
-        pdf_id = pdfgenrateprocess(message)
+        pdf_id = pdfgenrateprocess(sitemap_response)
         # Yield a final chunk with PDF link
         yield f"\n\n📄 Response saved in PDF: <a href='{APP_URL}documents/{pdf_id}'>Click here to view the detailed report</a>\n"
 
