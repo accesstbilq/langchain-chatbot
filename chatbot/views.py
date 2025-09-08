@@ -659,98 +659,16 @@ def validate_sitemap_with_two_documents(sitemap_url: str, seo_doc_id: str, seman
     """
     global chat_system, messages
     
-    def stream_status_update(message):
-        """Helper function to stream status updates to the frontend"""
-        # This would need to be connected to your streaming mechanism
-        # For now, we'll add the status to the response
-        print(f"🔄 {message}")  # This will show in console
-        return f"{message}\n"
-    
     try:
         status_updates = []
-        
-        # Step 1: Initial validation
-        status_updates.append(stream_status_update("🗺️ Fetching sitemap contents..."))
-        
-        # Load chat history for this session
-        if session_id in chat_history:
-            messages = chat_history[session_id].copy()
-        
-        # Step 2: Load all URLs from sitemap
-        status_updates.append(stream_status_update("🔗 Extracting all valid URLs..."))
-        loader = SitemapLoader(web_path=sitemap_url, continue_on_failure=True)
-        documents = loader.load()
-        
-        linkurls = []
-        for doc in documents[:5]:  # Limit to first 5 URLs for demo
-            url = doc.metadata.get("loc")
-            if url and is_valid_url(url):
-                linkurls.append(url)
 
-        if not linkurls:
-            return json.dumps({
-                "success": False, 
-                "error": "No valid URLs found in sitemap",
-                "status_updates": status_updates
-            }, indent=2)
-
-        # Step 3: Load guideline documents
-        status_updates.append(stream_status_update("📚 Loading SEO and Semantic guidelines..."))
-        
-        # Validate documents exist
-        if seo_doc_id not in uploaded_documents:
-            return json.dumps({
-                "success": False, 
-                "error": f"SEO document {seo_doc_id} not found",
-                "status_updates": status_updates
-            }, indent=2)
-        
-        if semantic_doc_id not in uploaded_documents:
-            return json.dumps({
-                "success": False, 
-                "error": f"Semantic document {semantic_doc_id} not found",
-                "status_updates": status_updates
-            }, indent=2)
-
-        # Step 4: Process each URL
-        status_updates.append(stream_status_update("📄 Processing each page systematically..."))
-        results = []
-
-        # for i, url in enumerate(linkurls, 1):
-        #     status_updates.append(stream_status_update(f"📊 Analyzing URL {i}/{len(linkurls)}: {url}"))
-            
-        #     try:
-        #         result_json = validate_url_with_two_documents.invoke({
-        #             "url": url,
-        #             "seo_doc_id": seo_doc_id,
-        #             "semantic_doc_id": semantic_doc_id
-        #         })
-        #         results.append(json.loads(result_json))
-        #     except Exception as url_error:
-        #         results.append({
-        #             "url": url,
-        #             "success": False,
-        #             "error": f"Validation failed for {url}: {str(url_error)}"
-        #         })
-
-        # # Step 5: Finalize report
-        # status_updates.append(stream_status_update("📊 Creating site-wide compliance report..."))
-        # status_updates.append(stream_status_update("✨ Analysis complete! Generating response..."))
         chat_system = "Tool call - Sitemap URL + Two Documents Validation (SEO + Semantic guidelines)"
-        # Step 6: Build structured response
+        
         final_result = {
             "success": True,
             "sitemap_url": sitemap_url,
-            "total_urls": len(linkurls),
-            "seo_doc_id":seo_doc_id,
-            "semantic_doc_id":semantic_doc_id,
-            "results": linkurls,
-            "processing_summary": {
-                "urls_found": len(documents),
-                "urls_processed": len(linkurls),
-                "successful_validations": len([r for r in results if r.get("success", True)]),
-                "failed_validations": len([r for r in results if not r.get("success", True)])
-            }
+            "seo_doc_id": seo_doc_id,
+            "semantic_doc_id": semantic_doc_id
         }
         
         return json.dumps(final_result, indent=2, ensure_ascii=False)
@@ -1226,23 +1144,54 @@ def stream_static_message(message):
             time.sleep(0.1)
 
 def sitemap_stream_static_message(llm_with_tools, tool_result, ai_msg, session_id, chat_system, count,tool_call_id,messages):
+    
     """Stream a static message with typing effect"""
+    
     sitemap_response = ''
-    yield yield_runtime_status("🗺️ Fetching sitemap contents...", 0.3)
-    yield yield_runtime_status("🔗 Extracting all valid URLs...", 0.8)
-    yield yield_runtime_status("📚 Loading SEO and Semantic guidelines...", 0.8)
-    yield yield_runtime_status("📄 Processing each page systematically...", 0.8)
+	
     tool_result_dict = json.loads(tool_result)
     xcount = 0
     lenusername = 0
-    linkurls = tool_result_dict['results']
+    linkurls = []
+	
+    results = []
+
     seo_doc_id = tool_result_dict['seo_doc_id']
     semantic_doc_id = tool_result_dict['semantic_doc_id']
+    sitemap_url = tool_result_dict['sitemap_url']
+	
+    # Step 1: Initial validation
+    yield yield_runtime_status("🗺️ Fetching sitemap contents...", 0.3)
 
-    results = []
+    # Step 2: Load all URLs from sitemap
+    yield yield_runtime_status("🔗 Extracting all valid URLs...", 0.8)
+	
+    loader = SitemapLoader(web_path=sitemap_url, continue_on_failure=True)
+    documents = loader.load()
+	
+    for doc in documents[:5]:
+        url = doc.metadata.get("loc")
+        if url and is_valid_url(url):
+            linkurls.append(url)
+            
+    if not linkurls:
+        yield "\nNo valid URLs found in sitemap"
+
+	# Step 3: Load guideline documents
+    yield yield_runtime_status("📚 Loading SEO and Semantic guidelines...", 0.8)
+    
+	# Validate documents exist
+    if seo_doc_id not in uploaded_documents:
+        yield f"SEO document {seo_doc_id} not found"
+		
+    if semantic_doc_id not in uploaded_documents:
+	    yield f"Semantic document {semantic_doc_id} not found"
+
+    # Step 4: Process each URL 
+    yield yield_runtime_status("📄 Processing each page systematically...", 0.3)
     for i, url in enumerate(linkurls, 1):
-        yield yield_runtime_status(f"📊 Analyzing URL {i}/{len(linkurls)}: {url}", 0.3)
         try:
+            yield yield_runtime_status(f"📊 Analyzing URL {i}/{len(linkurls)}: {url}", 0.3)
             result_json = validate_url_with_two_documents.invoke({
                 "url": url,
                 "seo_doc_id": seo_doc_id,
@@ -1269,11 +1218,7 @@ def sitemap_stream_static_message(llm_with_tools, tool_result, ai_msg, session_i
 
 
         except Exception as url_error:
-            results.append({
-                "url": url,
-                "success": False,
-                "error": f"Validation failed for {url}: {str(url_error)}"
-            })
+            yield f"\nValidation failed for {url}: {str(url_error)}"
 
     total_tokens = lenusername + len(sitemap_response.split())
     yield yield_runtime_status("📊 Creating site-wide compliance report...", 0.3)
