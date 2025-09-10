@@ -19,7 +19,9 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
 from reportlab.lib.styles import getSampleStyleSheet
 from datetime import datetime
 import mimetypes
-
+from bs4 import XMLParsedAsHTMLWarning
+import warnings
+warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 # Parsing HTML
 from bs4 import BeautifulSoup
 
@@ -101,15 +103,11 @@ system_message = """You are an expert SEO assistant with name validation capabil
     6. If the user clearly asks for a basic arithmetic calculation (e.g., multiplication, addition, subtraction, division), call the appropriate calculation tool.
     7. If the user provides or asks to validate a URL, call the `validate_and_fetch_url` tool to check its validity and fetch its title.
     8. If the user provides a URL, call the `seo_url_parser` tool to parse the content and extract metadata, headings, FAQs, etc.
-    9. If the user provides a URL + 1 Document ID for SEO guidelines, call the `validate_url_with_document_seo_guideline` tool to check compliance against SEO guidelines.
-    10. If the user provides a URL + 1 Document ID for Semantic guidelines, call the `validate_url_with_document_semantic_guideline` tool to check compliance against Semantic guidelines.
-    11. If the user provides a URL + 2 Document IDs (one for SEO guidelines and another for semantic guidelines), call the `validate_url_with_two_documents` tool to check compliance against both guidelines.
-    12. With Output Parsers: Ensure the result from `validate_url_with_two_documents` is structured using output parsers (so compliance, non-compliance, and analysis data are cleanly separated).
+    9. If the user provides One or more URL + One or more Document IDs (one for SEO guidelines and another for semantic guidelines), call the `validate_url_with_document` tool to check compliance against both guidelines.
+    12. With Output Parsers: Ensure the result from `validate_url_with_document` is structured using output parsers (so compliance, non-compliance, and analysis data are cleanly separated).
     13. You can analyze uploaded documents for SEO-related insights when asked.
     14. Always provide actionable, practical SEO recommendations with clear steps.
     15. If user sends any message before providing a valid name, remind them to share their name first.
-    16. If the user provides multiple URLs + 2 Document IDs (one for SEO guidelines and another for semantic guidelines), call the `validate_multiple_urls_with_two_documents` tool to check compliance against both guidelines.
-    17. If the user provides a Sitemap URL + 2 Document IDs (SEO + Semantic), fetch ALL URLs from the sitemap and call `validate_sitemap_with_two_documents` 
     """
 
 welcome_message = """👋 **Welcome to your Personal SEO Assistant!**
@@ -130,11 +128,7 @@ welcome_message = """👋 **Welcome to your Personal SEO Assistant!**
     - Basic calculations (just ask me to multiply numbers)  
     - URL validation and title fetching  
     - Document analysis for SEO insights  
-    - URL + 1 Document for SEO Guideline Validation  
-    - URL + 1 Document for Semantic Guideline Validation  
-    - URL + 2 Documents (SEO + Semantic Guideline Validation)
-    - Multiple URLs + 2 Documents → Full SEO + Semantic Guideline Validation for all pages
-    - Sitemap URLs + 2 Documents → Full SEO + Semantic Guideline Validation for all pages
+    - One or More URLs + One or More Documents → Full SEO + Semantic Guideline Validation for all pages
 
     But first, I'd love to know who I'm talking to. **What's your name?**  
 
@@ -350,337 +344,32 @@ def seo_url_parser(url: str) -> str:
         result["validation"]["error"] = f"Parsing error: {str(e)}"
         return json.dumps(result, indent=2)
 
+
 @tool
-def validate_url_with_document_seo_guideline(url: str, document_id: str) -> str:
-    """
-    Validate and parse a URL, then compare the results against an uploaded SEO guideline document.
-
+def validate_url_with_document(url: list, document_ids: list) -> str:
+    """Validate a URL and fetch its title if valid.
     Args:
-        url: The URL to validate and parse
-        document_id: The document ID of the uploaded SEO guideline file
-
+        url: List of URL to validate and fetch title from
+        document_ids: List of document IDs to validate against
     Returns:
-        JSON string with comparison results + parsed SEO analysis
+        Validation result and title if successful
     """
     global chat_system
+    chat_system = "Tool call - URL Validation with documents"
     
-
-    try:
-        # Step 1: Parse the URL using existing seo_url_parser
-        parsed_data_json = seo_url_parser.invoke({"url": url})
-        parsed_data = json.loads(parsed_data_json)
-
-        chat_system = "Tool call - URL + SEO Document Validation"
-        # Step 2: Fetch the uploaded document from in-memory store
-        if document_id not in uploaded_documents:
-            return json.dumps({
-                "success": False,
-                "error": f"SEO guideline document with ID {document_id} not found"
-            }, indent=2)
-
-        doc_info = uploaded_documents[document_id]
-        file_path = doc_info["file_path"]
-
-        # Step 3: Read document contents
-        guideline_text = ""
-        try:
-            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                guideline_text = f.read()
-        except Exception as e:
-            return json.dumps({
-                "success": False,
-                "error": f"Failed to read document: {str(e)}"
-            }, indent=2)
-
-        # Step 4: Perform compliance checks
-        compliance = []
-        non_compliance = []
-
-        # Example: Check if meta description required
-        if "meta description" in guideline_text.lower() and not parsed_data["metadata"].get("description"):
-            non_compliance.append("Missing meta description.")
-        else:
-            compliance.append("Meta description present.")
-
-        # Example: Check if FAQ schema required
-        if "faq" in guideline_text.lower() and not parsed_data.get("faq_data"):
-            non_compliance.append("Missing FAQ structured content.")
-        else:
-            compliance.append("FAQ data present.")
-
-        # Step 5: Build comparison result (now includes parsed SEO analysis)
+    try:        
         comparison_result = {
-            "url": url,
-            "seo_document_id": document_id,
-            "validation": parsed_data.get("validation", {}),
-            "compliance": compliance,
-            "non_compliance": non_compliance,
-            "seo_analysis": {
-                "metadata": parsed_data.get("metadata", {}),
-                "headings": parsed_data.get("headings", {}),
-                "faq_data": parsed_data.get("faq_data", []),
-                "additional_data": parsed_data.get("additional_data", {})
-            }
-        }
-
-        return json.dumps(comparison_result, indent=2, ensure_ascii=False)
-
-    except Exception as e:
-        return json.dumps({
-            "success": False,
-            "error": f"Validation failed: {str(e)}"
-        }, indent=2)
-
-@tool
-def validate_url_with_document_semantic_guideline(url: str, document_id: str) -> str:
-    """
-    Validate and parse a URL, then compare results against a Semantic guideline document.
-
-    Args:
-        url: The URL to validate and parse
-        document_id: Document ID for Semantic guideline
-
-    Returns:
-        JSON string with compliance results + parsed SEO analysis
-    """
-    global chat_system
-    
-    try:
-        # Step 1: Parse the URL
-        parsed_data_json = seo_url_parser.invoke({"url": url})
-        parsed_data = json.loads(parsed_data_json)
-        chat_system = "Tool call - URL + Semantic Document Validation"
-
-        # Step 2: Fetch semantic document
-        if document_id not in uploaded_documents:
-            return json.dumps({
-                "success": False,
-                "error": f"Semantic guideline document with ID {document_id} not found"
-            }, indent=2)
-
-        doc_info = uploaded_documents[document_id]
-        file_path = doc_info["file_path"]
-
-        # Step 3: Read file contents
-        guideline_text = ""
-        try:
-            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                guideline_text = f.read()
-        except Exception as e:
-            return json.dumps({
-                "success": False,
-                "error": f"Failed to read document: {str(e)}"
-            }, indent=2)
-
-        # Step 4: Semantic checks
-        compliance = []
-        non_compliance = []
-
-        if "h1" in guideline_text.lower() and not parsed_data["headings"].get("h1"):
-            non_compliance.append("Missing H1 heading.")
-        else:
-            compliance.append("H1 heading present.")
-
-        if "keywords" in guideline_text.lower() and not parsed_data["metadata"].get("keywords"):
-            non_compliance.append("Missing meta keywords.")
-        else:
-            compliance.append("Keywords present.")
-
-        if "readability" in guideline_text.lower() and parsed_data.get("additional_data", {}).get("content_analysis", {}).get("readability_score") == "Hard":
-            non_compliance.append("Content readability is hard, needs improvement.")
-        else:
-            compliance.append("Content readability acceptable.")
-
-        # Step 5: Build result
-        comparison_result = {
-            "url": url,
-            "semantic_document_id": document_id,
-            "validation": parsed_data.get("validation", {}),
-            "compliance": compliance,
-            "non_compliance": non_compliance,
-            "seo_analysis": {
-                "metadata": parsed_data.get("metadata", {}),
-                "headings": parsed_data.get("headings", {}),
-                "faq_data": parsed_data.get("faq_data", []),
-                "additional_data": parsed_data.get("additional_data", {})
-            }
-        }
-
-        return json.dumps(comparison_result, indent=2, ensure_ascii=False)
-
-    except Exception as e:
-        return json.dumps({
-            "success": False,
-            "error": f"Validation failed: {str(e)}"
-        }, indent=2)
-
-@tool
-def validate_url_with_two_documents(url: str, seo_doc_id: str, semantic_doc_id: str) -> str:
-    """
-    Validate and parse a URL, then compare results against SEO and Semantic guideline documents.
-
-    Args:
-        url: The URL to validate and parse
-        seo_doc_id: Document ID for SEO guideline
-        semantic_doc_id: Document ID for Semantic guideline
-
-    Returns:
-        JSON string with compliance results + parsed SEO analysis
-    """
-    global chat_system
-    try:
-        # Step 1: Parse URL using existing seo_url_parser
-        parsed_data_json = seo_url_parser.invoke({"url": url})
-        parsed_data = json.loads(parsed_data_json)
-
-        chat_system = "Tool call - URL + Two Documents Validation (one for SEO guidelines and another for semantic guidelines)"
-
-        # Step 2: Fetch both documents
-        if seo_doc_id not in uploaded_documents:
-            return json.dumps({"success": False, "error": f"SEO document {seo_doc_id} not found"}, indent=2)
-        if semantic_doc_id not in uploaded_documents:
-            return json.dumps({"success": False, "error": f"Semantic document {semantic_doc_id} not found"}, indent=2)
-
-        seo_doc = uploaded_documents[seo_doc_id]
-        semantic_doc = uploaded_documents[semantic_doc_id]
-
-        # Read documents
-        def read_doc(file_path):
-            try:
-                with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                    return f.read()
-            except:
-                return ""
-
-        seo_text = read_doc(seo_doc["file_path"])
-        semantic_text = read_doc(semantic_doc["file_path"])
-
-        # Step 3: Compliance checks
-        compliance = []
-        non_compliance = []
-
-        # SEO checks
-        if "meta description" in seo_text.lower() and not parsed_data["metadata"].get("description"):
-            non_compliance.append("SEO: Missing meta description.")
-        else:
-            compliance.append("SEO: Meta description present.")
-
-        if "faq" in seo_text.lower() and not parsed_data.get("faq_data"):
-            non_compliance.append("SEO: Missing FAQ structured content.")
-        else:
-            compliance.append("SEO: FAQ data present.")
-
-        # Semantic checks
-        if "h1" in semantic_text.lower() and not parsed_data["headings"].get("h1"):
-            non_compliance.append("Semantic: Missing H1 heading.")
-        else:
-            compliance.append("Semantic: H1 heading present.")
-
-        if "keywords" in semantic_text.lower() and not parsed_data["metadata"].get("keywords"):
-            non_compliance.append("Semantic: Missing meta keywords.")
-        else:
-            compliance.append("Semantic: Keywords present.")
-
-        # Step 4: Build combined result
-        comparison_result = {
-            "url": url,
-            "seo_document_id": seo_doc_id,
-            "semantic_document_id": semantic_doc_id,
-            "validation": parsed_data.get("validation", {}),
-            "compliance": compliance,
-            "non_compliance": non_compliance,
-            "seo_analysis": {
-                "metadata": parsed_data.get("metadata", {}),
-                "headings": parsed_data.get("headings", {}),
-                "faq_data": parsed_data.get("faq_data", []),
-                "additional_data": parsed_data.get("additional_data", {})
-            }
-        }
-
-        return json.dumps(comparison_result, indent=2, ensure_ascii=False)
-
-    except Exception as e:
-        return json.dumps({
-            "success": False,
-            "error": f"Validation failed: {str(e)}"
-        }, indent=2)
-
-@tool
-def validate_multiple_urls_with_two_documents(urls: list, seo_doc_id: str, semantic_doc_id: str) -> str:
-    """
-    Validate and parse multiple URLs, then compare results against SEO and Semantic guideline documents.
-
-    Args:
-        urls: A list of URLs to validate and parse
-        seo_doc_id: Document ID for SEO guideline
-        semantic_doc_id: Document ID for Semantic guideline
-
-    Returns:
-        JSON string with compliance results + parsed SEO analysis for each URL
-    """
-    global chat_system
-    try:
-        results = []
-        # Step 2: Iterate over URLs
-        for url in urls:
-            try:
-                result_json = validate_url_with_two_documents.invoke({"url": url,"seo_doc_id": seo_doc_id,"semantic_doc_id": semantic_doc_id})
-                results.append(json.loads(result_json))
-                chat_system = "Tool call - Multiple URLs + Two Documents Validation (SEO + Semantic guidelines)"
-            except Exception as inner_e:
-                results.append({
-                    "url": url,
-                    "success": False,
-                    "error": f"Validation failed for {url}: {str(inner_e)}"
-                })
-        return json.dumps({"success": True, "results": results}, indent=2, ensure_ascii=False)
-    except Exception as e:
-        return json.dumps({
-            "success": False,
-            "error": f"Multiple URL validation failed: {str(e)}"
-        }, indent=2)
-
-@tool
-def validate_sitemap_with_two_documents(sitemap_url: str, seo_doc_id: str, semantic_doc_id: str, session_id: str, tool_call_id: str, count: int = 0) -> str:
-    """
-    Validate and parse Sitemap URL, then compare results against SEO and Semantic guideline documents.
-    This version includes runtime status messages that stream to the chatbot interface.
-
-    Args:
-        sitemap_url: The sitemap URL to fetch all links
-        seo_doc_id: Document ID for SEO guideline
-        semantic_doc_id: Document ID for Semantic guideline
-        session_id: Current chat session ID
-        tool_call_id: Tool call identifier
-        count: Message count
-
-    Returns:
-        JSON string with compliance results + parsed SEO analysis for each URL
-    """
-    global chat_system, messages
-    
-    try:
-        status_updates = []
-
-        chat_system = "Tool call - Sitemap URL + Two Documents Validation (SEO + Semantic guidelines)"
-        
-        final_result = {
             "success": True,
-            "sitemap_url": sitemap_url,
-            "seo_doc_id": seo_doc_id,
-            "semantic_doc_id": semantic_doc_id
+            "url": url,
+            "document_ids": document_ids,
         }
-        
-        return json.dumps(final_result, indent=2, ensure_ascii=False)
-        
-    except Exception as e:
-        error_result = {
-            "success": False, 
-            "error": f"Sitemap validation failed: {str(e)}",
-            "status_updates": status_updates if 'status_updates' in locals() else []
-        }
-        return json.dumps(error_result, indent=2)
-    
+        return json.dumps(comparison_result, indent=2, ensure_ascii=False)
+    except requests.exceptions.RequestException as e:
+       return json.dumps({
+            "success": False,
+            "error": f"Validation failed: {str(e)}"
+        }, indent=2)
+
 # =============================
 # Simple Views (Frontend Pages)
 # =============================
@@ -851,7 +540,7 @@ def chatbot_input(request):
         )
 
         # Tools available
-        tools = [multiply, validate_and_fetch_url, validate_name, seo_url_parser,validate_url_with_document_seo_guideline,validate_url_with_document_semantic_guideline,validate_url_with_two_documents,validate_multiple_urls_with_two_documents,validate_sitemap_with_two_documents]
+        tools = [multiply, validate_and_fetch_url, validate_name, seo_url_parser,validate_url_with_document]
 
         llm = ChatOpenAI(
             temperature=0.7,
@@ -861,6 +550,20 @@ def chatbot_input(request):
         llm_with_tools = llm.bind_tools(tools)
         chat_system = "LLM Call"
         
+
+        # Extract only the inner "id" values
+        ids = [item["id"] for item in uploaded_documents.values()]
+
+        # Convert list to string (comma separated)
+        ids_str = ", ".join(ids)
+
+        
+        documentid = ""
+
+        if ids_str:
+            documentid = f"against the document id {ids_str}"
+
+
         # Initialize or get existing chat history for this session
         if session_id not in chat_history:
             count = 0
@@ -899,7 +602,7 @@ def chatbot_input(request):
                 messages.append(HumanMessage(content=validation_instruction))
                 
             else:
-                                
+                usermessage = usermessage + " " + documentid              
                 # Add user message to history
                 chat_history[session_id].append(HumanMessage(content=usermessage))
                 chat_history[session_id].append(AIMessage(content=name_request_message))
@@ -944,6 +647,8 @@ def chatbot_input(request):
                     content_type='text/plain'
                 )
         else:
+
+            usermessage = usermessage + " " + documentid
             # Name is validated, proceed normally
             messages.append(HumanMessage(content=usermessage))
 
@@ -965,7 +670,6 @@ def chatbot_input(request):
 
         # Get initial AI response
         ai_msg = llm_with_tools.invoke(messages)
-        
         # Process tool calls if any
         if ai_msg.tool_calls:
             messages.append(ai_msg)
@@ -990,11 +694,7 @@ def chatbot_input(request):
                 "validate_and_fetch_url":validate_and_fetch_url,
                 "validate_name": validate_name,
                 "seo_url_parser":seo_url_parser,
-                "validate_url_with_document_seo_guideline":validate_url_with_document_seo_guideline,
-                "validate_url_with_document_semantic_guideline":validate_url_with_document_semantic_guideline,
-                "validate_url_with_two_documents":validate_url_with_two_documents,
-                "validate_multiple_urls_with_two_documents":validate_multiple_urls_with_two_documents,
-                "validate_sitemap_with_two_documents":validate_sitemap_with_two_documents
+                "validate_url_with_document":validate_url_with_document
             }
 
             for tool_call in ai_msg.tool_calls:
@@ -1016,11 +716,9 @@ def chatbot_input(request):
                             # Name validation successful
                             user_name_status[session_id]['name_validated'] = True
                             user_name_status[session_id]['name'] = tool_args.get('name', '')
-                        
-                        
 
                         # Sitemap Tool One by One URL Response
-                        if chat_system == "Tool call - Sitemap URL + Two Documents Validation (SEO + Semantic guidelines)":
+                        if chat_system == "Tool call - URL Validation with documents":
                             return StreamingHttpResponse(
                                 sitemap_stream_static_message(llm_with_tools, tool_result, ai_msg, session_id, chat_system, count,tool_call_id,messages),
                                 content_type='text/plain'
@@ -1089,28 +787,11 @@ def chatbot_input(request):
             # Store the conversation history (user message + AI response + tool messages)
             chat_history[session_id].append(HumanMessage(content=usermessage))
             chat_history[session_id].extend(messages[len(chat_history[session_id]):])
-            
-            # return StreamingHttpResponse(
-            #     build_stream_response(llm_with_tools, messages, ai_msg, session_id, chat_system, count),
-            #     content_type='text/plain'
-            # )
 
-            # Use enhanced streaming with runtime messages for specific tools
-            if chat_system in ["Tool call - SEO URL Parser", 
-                            "Tool call - URL + SEO Document Validation",
-                            "Tool call - URL + Semantic Document Validation",
-                            "Tool call - URL + Two Documents Validation (one for SEO guidelines and another for semantic guidelines)",
-                            "Tool call - Multiple URLs + Two Documents Validation (SEO + Semantic guidelines)",
-                            "Tool call - Sitemap URL + Two Documents Validation (SEO + Semantic guidelines)"]:
-                return StreamingHttpResponse(
-                build_stream_response_with_runtime_messages(llm_with_tools, messages, ai_msg, session_id, chat_system, count),
+            return StreamingHttpResponse(
+                build_stream_response(llm_with_tools, messages, ai_msg, session_id, chat_system, count),
                 content_type='text/plain'
-                )
-            else:
-                return StreamingHttpResponse(
-                    build_stream_response(llm_with_tools, messages, ai_msg, session_id, chat_system, count),
-                    content_type='text/plain'
-                )
+            )
 
         else:
             # No tools called, store conversation and stream response
@@ -1148,80 +829,112 @@ def sitemap_stream_static_message(llm_with_tools, tool_result, ai_msg, session_i
     """Stream a static message with typing effect"""
     
     sitemap_response = ''
-	
-    tool_result_dict = json.loads(tool_result)
     xcount = 0
     lenusername = 0
     linkurls = []
 	
-    results = []
+    # Define the main dictionary
+    comparison_result = {}
+    tool_result_dict = json.loads(tool_result)
+    urls = tool_result_dict['url']
+    document_ids = tool_result_dict['document_ids']
 
-    seo_doc_id = tool_result_dict['seo_doc_id']
-    semantic_doc_id = tool_result_dict['semantic_doc_id']
-    sitemap_url = tool_result_dict['sitemap_url']
-	
-    # Step 1: Initial validation
-    yield yield_runtime_status("🗺️ Fetching sitemap contents...", 0.3)
+    yield yield_runtime_status("🌐 Validating URL accessibility...")
+    for i, url in enumerate(urls, 1):
+        yield yield_runtime_status(f"🌐 Validating URL {i}/{len(urls)}: {url}")
+        valid_url = validate_and_fetch_url.invoke({
+            "url": url,
+        })
 
-    # Step 2: Load all URLs from sitemap
-    yield yield_runtime_status("🔗 Extracting all valid URLs...", 0.8)
-	
-    loader = SitemapLoader(web_path=sitemap_url, continue_on_failure=True)
-    documents = loader.load()
-	
-    for doc in documents[:5]:
-        url = doc.metadata.get("loc")
-        if url and is_valid_url(url):
-            linkurls.append(url)
+        if url.endswith(".xml"):
+            yield yield_runtime_status("🗺️ Fetching sitemap contents...")
+            loader = SitemapLoader(web_path=url, continue_on_failure=True)
+            documents = loader.load()
+            yield yield_runtime_status("🔗 Extracting all valid URLs...")
+
+            for doc in documents[:5]:
+                sitemapurl = doc.metadata.get("loc")
+                if sitemapurl and is_valid_url(sitemapurl):
+                    linkurls.append(sitemapurl)
+                if not linkurls:
+                    yield yield_runtime_status("🔗 No valid URLs found in sitemap...")
+
+            for i, linkurl in enumerate(linkurls, 1):
+                yield yield_runtime_status(f"🌐 Validating URL {i}/{len(linkurls)}: {linkurl}")
+                valid_url = validate_and_fetch_url.invoke({
+                    "url": linkurl,
+                })
+                comparison_result[linkurl] = {
+                    "url": linkurl,
+                    "document_ids": ", ".join(document_ids),
+                    "validate_url_result" : valid_url,
+                }
+            yield yield_runtime_status("📋 Preparing detailed analysis...")
+            for i, linkurl in enumerate(linkurls, 1):
+                try:
+                    yield yield_runtime_status(f"📋 Preparing URL detailed analysis {i}/{len(linkurls)}: {linkurl}")
+                    pre_result = seo_url_parser.invoke({
+                        "url": linkurl,
+                    })
+                    parsed_data = json.loads(pre_result)
+                    comparison_result[linkurl].update({
+                        "validation": parsed_data.get("validation", {}),
+                        "seo_analysis": {
+                            "metadata": parsed_data.get("metadata", {}),
+                            "headings": parsed_data.get("headings", {}),
+                            "faq_data": parsed_data.get("faq_data", []),
+                            "additional_data": parsed_data.get("additional_data", {})
+                        }
+                    })
+
+
+
+                except Exception as url_error:
+                    
+                    yield f"\nValidation failed for {linkurl}: {str(url_error)}"
+
             
-    if not linkurls:
-        yield "\nNo valid URLs found in sitemap"
-
-	# Step 3: Load guideline documents
-    yield yield_runtime_status("📚 Loading SEO and Semantic guidelines...", 0.8)
-    
-	# Validate documents exist
-    if seo_doc_id not in uploaded_documents:
-        yield f"SEO document {seo_doc_id} not found"
-		
-    if semantic_doc_id not in uploaded_documents:
-	    yield f"Semantic document {semantic_doc_id} not found"
-
-    # Step 4: Process each URL 
-    yield yield_runtime_status("📄 Processing each page systematically...", 0.3)
-    for i, url in enumerate(linkurls, 1):
-        try:
-            yield yield_runtime_status(f"📊 Analyzing URL {i}/{len(linkurls)}: {url}", 0.3)
-            result_json = validate_url_with_two_documents.invoke({
+        else:
+            yield yield_runtime_status(f"📋Preparing URL detailed analysis: {url}")
+            pre_result = seo_url_parser.invoke({
                 "url": url,
-                "seo_doc_id": seo_doc_id,
-                "semantic_doc_id": semantic_doc_id
             })
-            results.append(json.loads(result_json))
+            parsed_data = json.loads(pre_result)
+            comparison_result[url] = {
+                "url": url,
+                "document_ids": ", ".join(document_ids),
+                "validate_url_result" : valid_url,
+                "validation": parsed_data.get("validation", {}),
+                "seo_analysis": {
+                    "metadata": parsed_data.get("metadata", {}),
+                    "headings": parsed_data.get("headings", {}),
+                    "faq_data": parsed_data.get("faq_data", []),
+                    "additional_data": parsed_data.get("additional_data", {})
+                }                
+            }
 
-            result_sitemap = json.loads(result_json)
-            if xcount == 0:
-                messages.append(
-                    ToolMessage(content=str(result_sitemap), tool_call_id=tool_call_id)
-                )
-            else:
-                messages.append(
-                    HumanMessage(content=json.dumps(result_sitemap))
-                )
-            sitemap_response2 = sitemap_build_stream_response(llm_with_tools, messages, ai_msg, session_id, chat_system, count)
+    yield yield_runtime_status("📊 Creating site-wide compliance report...")
+    total = len(comparison_result)   # total URLs
+    for i, (url, data) in enumerate(comparison_result.items(), 1):
+        yield yield_runtime_status(f"📊 Creating site-wide compliance report {i}/{total}: {data['url']}")
+        if xcount == 0:
             messages.append(
-                AIMessage(content=sitemap_response2)
+                ToolMessage(content=str(data), tool_call_id=tool_call_id)
             )
-            sitemap_response += sitemap_response2
-            xcount = xcount + 1
-            lenusername =  len(json.dumps(result_sitemap))
-
-
-        except Exception as url_error:
-            yield f"\nValidation failed for {url}: {str(url_error)}"
+        else:
+            messages.append(
+                HumanMessage(content=json.dumps(data))
+            )
+        sitemap_response2 = sitemap_build_stream_response(llm_with_tools, messages, ai_msg, session_id, chat_system, count)
+        messages.append(
+            AIMessage(content=sitemap_response2)
+        )
+        sitemap_response += sitemap_response2
+        xcount = xcount + 1
+        lenusername =  len(json.dumps(data))
 
     total_tokens = lenusername + len(sitemap_response.split())
-    yield yield_runtime_status("📊 Creating site-wide compliance report...", 0.3)
+    
 
     tokenresponse[session_id].update({
         'total_tokens': total_tokens,
@@ -1260,13 +973,13 @@ def sitemap_stream_static_message(llm_with_tools, tool_result, ai_msg, session_i
         "output_tokens": len(sitemap_response.split()),
         "total_tokens": total_tokens
     })
-    yield yield_runtime_status("✨ Analysis complete! Generating response...", 0.3)
+    yield yield_runtime_status("✨ Analysis complete! Generating response...")
     # Save to database
     session, created = get_or_create_chat_session(session_id, generate_run_id(), None, False, chat_system)
     save_message_to_db(session, messagedata, generate_run_id(), count)
 
     try:
-        yield yield_runtime_status("📄 Generating PDF report...", 0.3)
+        yield yield_runtime_status("📄 Generating PDF report...")
         pdf_id = pdfgenrateprocess(sitemap_response)
         # Yield a final chunk with PDF link
         yield f"\n\n📄 Response saved in PDF: <a href='{APP_URL}documents/{pdf_id}'>Click here to view the detailed report</a>\n"
@@ -1778,146 +1491,6 @@ def pdfgenrateprocess(message: str) -> str:
 def yield_runtime_status(message, delay=0.1):
     """Yield runtime status messages with optional delay"""
     time.sleep(delay)
-    return f"🔄 {message}\n"
+    return f"🔄 {message}\n\n"
 
-# Enhanced streaming response builder with runtime messages
-def build_stream_response_with_runtime_messages(llm_with_tools, messages, ai_msg, session_id, chat_system, count):
-    """Enhanced streaming response generator with runtime status messages"""
-    try:
-        # Show initial runtime message based on tool being used
-        runtime_messages = {
-            "Tool call - SEO URL Parser": [
-                "🔍 Analyzing URL structure...",
-                "📊 Extracting metadata and headings...",
-                "❓ Scanning for FAQ content...",
-                "🔧 Performing SEO analysis...",
-                "📝 Generating comprehensive report..."
-            ],
-            "Tool call - URL + SEO Document Validation": [
-                "🌐 Validating URL accessibility...",
-                "📋 Loading SEO guidelines document...",
-                "⚖️ Comparing page against SEO standards...",
-                "✅ Checking compliance requirements...",
-                "📊 Compiling validation results..."
-            ],
-            "Tool call - URL + Semantic Document Validation": [
-                "🌐 Validating URL accessibility...",
-                "📄 Loading semantic guidelines document...",
-                "🔍 Analyzing content structure...",
-                "📏 Measuring semantic compliance...",
-                "📋 Preparing detailed analysis..."
-            ],
-            "Tool call - URL + Two Documents Validation (one for SEO guidelines and another for semantic guidelines)": [
-                "🌐 Validating URL accessibility...",
-                "📚 Loading SEO and Semantic guidelines...",
-                "🔍 Performing dual compliance analysis...",
-                "⚖️ Cross-referencing both standards...",
-                "📊 Generating comprehensive compliance report..."
-            ],
-            "Tool call - Multiple URLs + Two Documents Validation (SEO + Semantic guidelines)": [
-                "📝 Processing multiple URLs...",
-                "📚 Loading SEO and Semantic guidelines...",
-                "🔄 Analyzing each URL individually...",
-                "⚖️ Performing batch compliance checks...",
-                "📊 Compiling multi-URL analysis report..."
-            ],
-            "Tool call - Sitemap URL + Two Documents Validation (SEO + Semantic guidelines)": [
-                "🗺️ Fetching sitemap contents...",
-                "🔗 Extracting all valid URLs...",
-                "📚 Loading SEO and Semantic guidelines...",
-                "🔄 Processing each page systematically...",
-                "📊 Creating site-wide compliance report..."
-            ]
-        }
 
-        # Get runtime messages for current tool
-        status_messages = runtime_messages.get(chat_system, ["🔄 Processing your request..."])
-        
-        # Yield runtime status messages
-        for i, status_msg in enumerate(status_messages):
-            yield yield_runtime_status(status_msg, 0.5)
-        
-        # Add completion message
-        yield yield_runtime_status("✨ Analysis complete! Generating response...", 0.3)
-        yield "\n"
-
-        # Continue with normal streaming response
-        final_response_content = ""
-        usage_metadata = None
-        run_id = None
-
-        for chunk in llm_with_tools.stream(messages):
-            if isinstance(chunk, AIMessageChunk) and chunk.content:
-                final_response_content += chunk.content
-                run_id = chunk.id
-                #yield chunk.content
-
-            # Capture usage metadata
-            if hasattr(chunk, "usage_metadata") and chunk.usage_metadata:
-                usage_metadata = chunk.usage_metadata
-
-        # Store the final AI response in chat history
-        if final_response_content:
-
-            messages.append(
-                AIMessage(content=final_response_content)
-            )
-
-            if usage_metadata is None:  # Fallback for OpenAI
-                resp = llm_with_tools.invoke(messages, config={"include_usage_metadata": True})
-                usage_metadata = resp.usage_metadata
-
-            chat_history[session_id].append(AIMessage(content=final_response_content))
-
-            # Save token usage
-            response_type = 'Tool Usage' if ai_msg.tool_calls else 'General Conversation'
-            tools_used = len(ai_msg.tool_calls) > 0 if ai_msg.tool_calls else False
-            tokenresponse[session_id].update({
-                'total_tokens': usage_metadata['total_tokens'],
-                'input_tokens': usage_metadata['input_tokens'],
-                'output_tokens': usage_metadata['output_tokens'],
-                'response_type': response_type,
-                'tools_used': tools_used,
-                'source': chat_system,
-                'run_id': run_id
-            })
-
-            if chat_system == "Tool call - Name Validation": 
-                first_name = extract_name(final_response_content)
-                session, create = get_or_create_chat_session(session_id, run_id, first_name, True, chat_system)
-            else:
-                session, create = get_or_create_chat_session(session_id, run_id, None, False, chat_system)
-
-            # PDF GENERATION for specific tool calls
-            if chat_system in ["Tool call - URL + Two Documents Validation (one for SEO guidelines and another for semantic guidelines)",
-                             "Tool call - Multiple URLs + Two Documents Validation (SEO + Semantic guidelines)",
-                             "Tool call - Sitemap URL + Two Documents Validation (SEO + Semantic guidelines)",
-                             "Tool call - SEO URL Parser",
-                             "Tool call - URL + SEO Document Validation",
-                             "Tool call - URL + Semantic Document Validation"]:
-                try:
-                    yield yield_runtime_status("📄 Generating PDF report...", 0.3)
-                    pdf_id = pdfgenrateprocess(final_response_content)
-                    yield f"\n\n📄 Response saved in PDF: <a href='{APP_URL}documents/{pdf_id}'>Click here to view the detailed report</a>\n"
-                except Exception as e:
-                    yield f"\n[PDF generation failed: {str(e)}]"
-
-            messagedata[session_id].append({
-                "message_type": "ai",
-                "content": final_response_content,
-                "message_id": generate_message_id(),
-                "tool_calls": '',
-                "tool_call_id": '',
-                "count": count,
-                "response_type": response_type,
-                "tools_used": tools_used,
-                "source": chat_system,
-                "input_tokens": usage_metadata['input_tokens'],
-                "output_tokens": usage_metadata['output_tokens'],
-                "total_tokens": usage_metadata['total_tokens']
-            })
-
-            save_message_to_db(session, messagedata, run_id, count)
-
-    except (OpenAIError, APITimeoutError) as e:
-        yield f"\n[Error occurred: {str(e)}]"
