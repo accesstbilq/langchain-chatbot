@@ -407,7 +407,8 @@ def get_token_usage_view(request, run_id):
         'run_id': token_usage['run_id'],
         'input_tokens': token_usage['input_tokens'],
         'output_tokens': token_usage['output_tokens'],
-        'total_tokens': token_usage['total_tokens']
+        'total_tokens': token_usage['total_tokens'],
+        'log_input': token_usage['log_input'],
     })
 
 # =============================
@@ -510,7 +511,8 @@ def generate_name_request_stream(session_id):
             'response_type': 'welcome_message',
             'tools_used': False,
             'source': 'system',
-            'run_id': run_id
+            'run_id': run_id,
+            'log_input': ''
         })
         
         session, created = get_or_create_chat_session(session_id, run_id, None, False, 'welcome_message')
@@ -688,6 +690,7 @@ def chatbot_input(request):
 
         # Get initial AI response
         ai_msg = llm_with_tools.invoke(messages)
+        tool_result = None
         # Process tool calls if any
         if ai_msg.tool_calls:
             messages.append(ai_msg)
@@ -807,7 +810,7 @@ def chatbot_input(request):
             chat_history[session_id].extend(messages[len(chat_history[session_id]):])
 
             return StreamingHttpResponse(
-                build_stream_response(llm_with_tools, messages, ai_msg, session_id, chat_system, count),
+                build_stream_response(llm_with_tools, messages, ai_msg, session_id, chat_system, count,tool_result),
                 content_type='text/plain'
             )
 
@@ -816,7 +819,7 @@ def chatbot_input(request):
             chat_history[session_id].append(HumanMessage(content=usermessage))
             
             return StreamingHttpResponse(
-                build_stream_response(llm_with_tools, messages, ai_msg, session_id, chat_system, count),
+                build_stream_response(llm_with_tools, messages, ai_msg, session_id, chat_system, count,tool_result=None),
                 content_type='text/plain'
             )
 
@@ -953,6 +956,9 @@ def sitemap_stream_static_message(llm_with_tools, tool_result, ai_msg, session_i
 
     total_tokens = lenusername + len(sitemap_response.split())
     
+    # Call your existing function
+    pdf_id = save_to_json(comparison_result)
+
 
     tokenresponse[session_id].update({
         'total_tokens': total_tokens,
@@ -961,7 +967,9 @@ def sitemap_stream_static_message(llm_with_tools, tool_result, ai_msg, session_i
         'response_type': 'Tool Usage',
         'tools_used': True,
         'source': chat_system,
+        'log_input': f"<a href='{APP_URL}documents/{pdf_id}'>Click here to view the Log input to LLM</a>",
         'run_id': generate_message_id()
+        
     })    
     messagedata[session_id].append({
         "message_type": "tool",
@@ -1018,13 +1026,27 @@ def sitemap_build_stream_response(llm_with_tools, messages, ai_msg, session_id, 
     except (OpenAIError, APITimeoutError) as e:
         return f"\n[Error occurred: {str(e)}]"
 
-def build_stream_response(llm_with_tools, messages, ai_msg, session_id, chat_system, count):
+def build_stream_response(llm_with_tools, messages, ai_msg, session_id, chat_system, count,tool_result):
     """Unified streaming response generator with token usage tracking"""
     try:
         final_response_content = ""
         usage_metadata = None
         run_id = None
+        log_id = None
+        if tool_result:
+            if is_valid_json(tool_result):
+                tool_result_dict = json.loads(tool_result)
+                # Call your existing function
+                log_id = save_to_json(tool_result_dict)
+                print("✅ Valid JSON:")
+            else:
+                print("❌ Not valid JSON:")
 
+
+            
+        log_input = ''
+        if log_id:
+            log_input = f"<a href='{APP_URL}documents/{log_id}'>Click here to view the Log input to LLM</a>"
         for chunk in llm_with_tools.stream(messages):
             if isinstance(chunk, AIMessageChunk) and chunk.content:
                 final_response_content += chunk.content
@@ -1053,7 +1075,8 @@ def build_stream_response(llm_with_tools, messages, ai_msg, session_id, chat_sys
                 'response_type': response_type,
                 'tools_used': tools_used,
                 'source': chat_system,
-                'run_id': run_id
+                'run_id': run_id,
+                'log_input': log_input
             })
 
 
@@ -1509,3 +1532,43 @@ def yield_runtime_status(message, delay=0.1):
     """Yield runtime status messages with optional delay"""
     time.sleep(delay)
     return f"🔄 {message}\n\n"
+
+def save_to_json(data: dict) -> str:
+    json_id = str(uuid.uuid4())
+    file_name = f"comparison_result_{json_id}.json"
+    file_path = os.path.join("documents", file_name)
+
+    # Ensure folder exists
+    os.makedirs("documents", exist_ok=True)
+
+    # Save dict → JSON file
+    with open(file_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4, ensure_ascii=False)
+
+
+    file_size = os.path.getsize(file_path)   # in bytes
+    file_ext  = os.path.splitext(file_name)[1].lstrip('.')  # pdf
+    mime_type, _ = mimetypes.guess_type(file_path)  # 'application/pdf'
+    # Save to DB (Document model)
+    Document.objects.create(
+        document_id=json_id,
+        original_name=file_name,
+        file_name=file_name,
+        file_size=file_size,
+        file_type=file_ext,
+        mime_type=mime_type or "application/json",
+        file_path=file_path,
+        content="",  # or extracted text if you have it
+        upload_date=datetime.now().isoformat(),
+        url=f"/{file_name}"  # or file URL if you want to store one
+    )
+
+
+    return json_id
+
+def is_valid_json(data: str) -> bool:
+    try:
+        json.loads(data)
+        return True
+    except (ValueError, TypeError):
+        return False
