@@ -59,6 +59,7 @@ cover/
 chroma_db_chat_history/
 chroma_db_multi/
 documents/
+chroma_db/
 
 # Translations
 *.mo

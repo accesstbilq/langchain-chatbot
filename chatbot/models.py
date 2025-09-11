@@ -64,46 +64,48 @@ class ChatMessage(models.Model):
     #def __str__(self):
         #return f"{self.message_type}: {self.content[:50]}..."
 
-# class Document(models.Model):
-#     DOCUMENT_TYPES = [
-#         ('txt', 'Text'),
-#         ('pdf', 'PDF'),
-#         ('doc', 'Word Document'),
-#         ('docx', 'Word Document'),
-#         ('html', 'HTML'),
-#         ('css', 'CSS'),
-#         ('js', 'JavaScript'),
-#         ('json', 'JSON'),
-#         ('xml', 'XML'),
-#         ('csv', 'CSV'),
-#         ('xlsx', 'Excel'),
-#         ('ppt', 'PowerPoint'),
-#         ('pptx', 'PowerPoint'),
-#     ]
+class Document(models.Model):
+    DOCUMENT_TYPES = [
+        ('txt', 'Text'),
+        ('pdf', 'PDF'),
+        ('doc', 'Word Document'),
+        ('docx', 'Word Document'),
+        ('html', 'HTML'),
+        ('css', 'CSS'),
+        ('js', 'JavaScript'),
+        ('json', 'JSON'),
+        ('xml', 'XML'),
+        ('csv', 'CSV'),
+        ('xlsx', 'Excel'),
+        ('ppt', 'PowerPoint'),
+        ('pptx', 'PowerPoint'),
+    ]
     
-#     document_id = models.UUIDField(default=uuid.uuid4, unique=True, primary_key=True)
-#     session = models.ForeignKey(ChatSession, on_delete=models.CASCADE, related_name='documents', null=True, blank=True)
-#     original_name = models.CharField(max_length=255)
-#     file_name = models.CharField(max_length=255)
-#     file_size = models.PositiveIntegerField()
-#     file_type = models.CharField(max_length=10, choices=DOCUMENT_TYPES)
-#     mime_type = models.CharField(max_length=100)
-#     content = models.TextField()  # Extracted text content
-#     upload_date = models.DateTimeField(auto_now_add=True)
+    document_id = models.UUIDField(default=uuid.uuid4, unique=True, primary_key=True)
+    session = models.ForeignKey(ChatSession, on_delete=models.CASCADE, related_name='documents', null=True, blank=True)
+    original_name = models.CharField(max_length=255)
+    file_name = models.CharField(max_length=255)
+    file_size = models.PositiveIntegerField()
+    file_type = models.CharField(max_length=10, choices=DOCUMENT_TYPES)
+    mime_type = models.CharField(max_length=100)
+    content = models.TextField()  # Extracted text content
+    file_path = models.TextField()  # Extracted text content
+    url = models.TextField()  # Extracted text content
+    upload_date = models.DateTimeField(auto_now_add=True)
     
-#     # Embedding field - using JSONField for cross-database compatibility
-#     embedding = models.JSONField(blank=True, null=True)
+    # Embedding field - using JSONField for cross-database compatibility
+    embedding = models.JSONField(blank=True, null=True)
     
-#     # Metadata
-#     embedding_model = models.CharField(max_length=100, blank=True, null=True)  # e.g., 'text-embedding-3-small'
-#     embedding_created_at = models.DateTimeField(blank=True, null=True)
+    # Metadata
+    embedding_model = models.CharField(max_length=100, blank=True, null=True)  # e.g., 'text-embedding-3-small'
+    embedding_created_at = models.DateTimeField(blank=True, null=True)
     
-#     class Meta:
-#         ordering = ['-upload_date']
+    class Meta:
+        ordering = ['-upload_date']
     
-#     def __str__(self):
-#         return f"{self.original_name} ({self.file_type})"
+    def __str__(self):
+        return f"{self.original_name} ({self.file_type})"
     
-#     @property
-#     def has_embedding(self):
-#         return self.embedding is not None and len(self.embedding) > 0
+    @property
+    def has_embedding(self):
+        return self.embedding is not None and len(self.embedding) > 0

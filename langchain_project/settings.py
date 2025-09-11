@@ -13,7 +13,7 @@ https://docs.djangoproject.com/en/5.1/ref/settings/
 from pathlib import Path
 import os
 from dotenv import load_dotenv
-
+os.environ.setdefault("USER_AGENT", "langchain-chatbot/1.0 (django)")
 # Load environment variables
 load_dotenv()
 

@@ -14,7 +14,7 @@ import uuid
 from django.http import StreamingHttpResponse
 from urllib.parse import urljoin, urlparse
 # Database models
-from .models import ChatSession, ChatMessage
+from .models import ChatSession, ChatMessage, Document
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
 from reportlab.lib.styles import getSampleStyleSheet
 from datetime import datetime
@@ -32,6 +32,8 @@ from langchain_core.messages import ToolMessage,HumanMessage,AIMessageChunk
 from langchain.tools import tool
 from openai import OpenAIError, APITimeoutError
 from langchain_community.document_loaders.sitemap import SitemapLoader
+from langchain_chroma import Chroma
+from langchain_openai import OpenAIEmbeddings
 
 # =============================
 # Global Variables & Config
@@ -52,6 +54,7 @@ excluded_extensions = {
 load_dotenv()
 OPENAIKEY = os.getenv('OPEN_AI_KEY')
 MODEL = "gpt-4.1"
+EMBEDDING_MODEL = "text-embedding-3-small"
 APP_URL = "http://127.0.0.1:8000/"
 
 llm_with_tools = None
@@ -64,12 +67,21 @@ tokenresponse = {}  # Store chat history by session
 messagedata = {}  # Store chat history by session
 count = 0
 
+# -------------------------------
+# Chroma DB setup
+# -------------------------------
+CHROMA_DB_PATH = os.path.join(settings.BASE_DIR, "chroma_db")
+if not os.path.exists(CHROMA_DB_PATH):
+    os.makedirs(CHROMA_DB_PATH)
 
-try:
-    from .admin_views import uploaded_documents
-except ImportError:
-    # Fallback if import fails
-    uploaded_documents = {}
+embedding_function = OpenAIEmbeddings(model=EMBEDDING_MODEL, openai_api_key=OPENAIKEY)
+
+vectorstore = Chroma(
+    collection_name="documents",
+    embedding_function=embedding_function,
+    persist_directory=CHROMA_DB_PATH,
+)
+
 
 # Tracks name validation per session
 user_name_status = {}  # session_id -> {'name_validated': bool, 'name': str}
@@ -550,11 +562,17 @@ def chatbot_input(request):
         llm_with_tools = llm.bind_tools(tools)
         chat_system = "LLM Call"
         
+        all_docs = vectorstore._collection.get(include=["metadatas"])
 
-        # Extract only the inner "id" values
-        ids = [item["id"] for item in uploaded_documents.values()]
+        # Extract just the document_id values
+        document_ids = set()
+        for metadata in all_docs.get("metadatas", []):
+            if metadata and "document_id" in metadata:
+                document_ids.add(metadata["document_id"])
 
-        # Convert list to string (comma separated)
+        print("All document IDs in Chroma:", list(document_ids))
+        ids = list(document_ids)
+
         ids_str = ", ".join(ids)
 
         
@@ -1048,7 +1066,7 @@ def build_stream_response(llm_with_tools, messages, ai_msg, session_id, chat_sys
                 session, create = get_or_create_chat_session(session_id, run_id,None,False,chat_system)
 
             # === PDF GENERATION: Save entire final_response_content ===
-            if chat_system in ["Tool call - URL + Two Documents Validation (one for SEO guidelines and another for semantic guidelines)","Tool call - Multiple URLs + Two Documents Validation (SEO + Semantic guidelines)","Tool call - Sitemap URL + Two Documents Validation (SEO + Semantic guidelines)","Tool call - SEO URL Parser","Tool call - URL + SEO Document Validation","Tool call - URL + Semantic Document Validation"]:
+            if chat_system in ["Tool call - SEO URL Parser"]:
                 try:
 
                     pdf_id = pdfgenrateprocess(final_response_content)
@@ -1249,7 +1267,6 @@ def extract_metadata(soup, url):
     
     return metadata
 
-
 def extract_headings(soup):
     """Extract all headings (H1-H6) from the page"""
     headings = {
@@ -1286,7 +1303,6 @@ def extract_headings(soup):
     
     return headings
 
-
 def extract_faq_data(soup):
     """Extract FAQ data using multiple detection methods"""
     faq_data = []
@@ -1320,7 +1336,6 @@ def extract_faq_data(soup):
             unique_faqs.append(faq)
     
     return unique_faqs
-
 
 def extract_additional_seo_data(soup, url):
     """Extract additional SEO-relevant data"""
@@ -1386,7 +1401,6 @@ def extract_additional_seo_data(soup, url):
     }
     
     return additional_data
-
 
 def calculate_simple_readability(text):
     """Calculate a simple readability score"""
@@ -1474,17 +1488,20 @@ def pdfgenrateprocess(message: str) -> str:
     file_size = os.path.getsize(pdf_path)   # in bytes
     file_ext  = os.path.splitext(pdf_filename)[1].lstrip('.')  # pdf
     mime_type, _ = mimetypes.guess_type(pdf_path)  # 'application/pdf'
-    uploaded_documents[pdf_id] = {
-        "file_name": pdf_filename,
-        "file_path": pdf_path,
-        "uploaded_at": datetime.now().isoformat(),
-        "upload_date": datetime.now().isoformat(),
-        "original_name":pdf_filename,
-        "id":pdf_id,
-        "size": file_size,
-        "file_type": file_ext,
-        "mime_type": mime_type or "application/octet-stream",
-    }
+
+    # Save to DB (Document model)
+    Document.objects.create(
+        document_id=pdf_id,
+        original_name=pdf_filename,
+        file_name=pdf_filename,
+        file_size=file_size,
+        file_type=file_ext,
+        mime_type=mime_type or "application/octet-stream",
+        file_path=pdf_path,
+        content="",  # or extracted text if you have it
+        upload_date=datetime.now().isoformat(),
+        url=f"/{pdf_filename}"  # or file URL if you want to store one
+    )
     return pdf_id
 
 # Add this new function to handle runtime status messages
@@ -1492,5 +1509,3 @@ def yield_runtime_status(message, delay=0.1):
     """Yield runtime status messages with optional delay"""
     time.sleep(delay)
     return f"🔄 {message}\n\n"
-
-
