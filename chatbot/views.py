@@ -590,8 +590,8 @@ def chatbot_input(request):
                 documentid = f"against the document id {ids_str}"
 
             
-            reg_result = get_relevant_documents(usermessage,session_id)
-
+        reg_result = get_relevant_documents(usermessage,session_id)
+        print(reg_result)
             
 
 
@@ -1638,13 +1638,13 @@ def serialize_messages(messages):
 # -------------------------------
 # Enhanced RAG functions
 # -------------------------------
-def get_relevant_documents(query: str, session_id: str = None, n_results: int = 5) -> List[Dict[str, Any]]:
+def get_relevant_documents(query: str, session_id: str = None, n_results: int = 1) -> List[Dict[str, Any]]:
     """Get relevant documents for RAG using semantic search with chapter information."""
     try:
-        results = vectorstore.similarity_search_with_score(query, k=n_results)
+        results = vectorstore.similarity_search(query, k=n_results)
 
         relevant_docs = []
-        for doc, score in results:
+        for doc in results:
             metadata = doc.metadata
             relevant_docs.append({
                 "content": doc.page_content,
@@ -1655,8 +1655,7 @@ def get_relevant_documents(query: str, session_id: str = None, n_results: int = 
                 "chunk_index": metadata.get("chunk_index", 0),
                 "chapter_title": metadata.get("chapter_title", ""),
                 "chapter_number": metadata.get("chapter_number", ""),
-                "section_header": metadata.get("section_header", ""),
-                "similarity": 1 - score
+                "section_header": metadata.get("section_header", "")
             })
 
         return relevant_docs
