@@ -24,6 +24,7 @@ import warnings
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 # Parsing HTML
 from bs4 import BeautifulSoup
+import ast
 
 # LangChain & OpenAI integration
 from langchain_openai import ChatOpenAI
@@ -34,6 +35,9 @@ from openai import OpenAIError, APITimeoutError
 from langchain_community.document_loaders.sitemap import SitemapLoader
 from langchain_chroma import Chroma
 from langchain_openai import OpenAIEmbeddings
+
+from .admin_views import load_chat_history_from_db
+
 
 # =============================
 # Global Variables & Config
@@ -565,23 +569,23 @@ def chatbot_input(request):
         chat_system = "LLM Call"
         
         all_docs = vectorstore._collection.get(include=["metadatas"])
-
-        # Extract just the document_id values
-        document_ids = set()
-        for metadata in all_docs.get("metadatas", []):
-            if metadata and "document_id" in metadata:
-                document_ids.add(metadata["document_id"])
-
-        print("All document IDs in Chroma:", list(document_ids))
-        ids = list(document_ids)
-
-        ids_str = ", ".join(ids)
-
         
-        documentid = ""
 
-        if ids_str:
-            documentid = f"against the document id {ids_str}"
+        url_pattern = re.compile(r'https?://[^\s]+')
+        match = url_pattern.search(usermessage)
+        ids_str = ''
+        documentid = ""
+        if match:
+            # Extract just the document_id values
+            document_ids = set()
+            for metadata in all_docs.get("metadatas", []):
+                if metadata and "document_id" in metadata:
+                    document_ids.add(metadata["document_id"])
+            ids = list(document_ids)
+
+            ids_str = ", ".join(ids)
+            if ids_str:
+                documentid = f"against the document id {ids_str}"
 
 
         # Initialize or get existing chat history for this session
@@ -957,20 +961,12 @@ def sitemap_stream_static_message(llm_with_tools, tool_result, ai_msg, session_i
     total_tokens = lenusername + len(sitemap_response.split())
     
     # Call your existing function
-    pdf_id = save_to_json(comparison_result)
 
 
-    tokenresponse[session_id].update({
-        'total_tokens': total_tokens,
-        'input_tokens': lenusername,
-        'output_tokens': len(sitemap_response.split()),
-        'response_type': 'Tool Usage',
-        'tools_used': True,
-        'source': chat_system,
-        'log_input': f"<a href='{APP_URL}documents/{pdf_id}'>Click here to view the Log input to LLM</a>",
-        'run_id': generate_message_id()
-        
-    })    
+   
+
+
+       
     messagedata[session_id].append({
         "message_type": "tool",
         "content": str(tool_result),
@@ -1004,6 +1000,22 @@ def sitemap_stream_static_message(llm_with_tools, tool_result, ai_msg, session_i
     session, created = get_or_create_chat_session(session_id, generate_run_id(), None, False, chat_system)
     save_message_to_db(session, messagedata, generate_run_id(), count)
 
+
+    json_ready_messages = serialize_messages(messages)
+    pdf_id = save_to_json(json_ready_messages)
+    tokenresponse[session_id].update({
+        'total_tokens': total_tokens,
+        'input_tokens': lenusername,
+        'output_tokens': len(sitemap_response.split()),
+        'response_type': 'Tool Usage',
+        'tools_used': True,
+        'source': chat_system,
+        'log_input': f"<a href='{APP_URL}documents/{pdf_id}'>Click here to view the Log input to LLM</a>",
+        'run_id': generate_message_id()
+        
+    }) 
+
+
     try:
         yield yield_runtime_status("📄 Generating PDF report...")
         pdf_id = pdfgenrateprocess(sitemap_response)
@@ -1033,20 +1045,7 @@ def build_stream_response(llm_with_tools, messages, ai_msg, session_id, chat_sys
         usage_metadata = None
         run_id = None
         log_id = None
-        if tool_result:
-            if is_valid_json(tool_result):
-                tool_result_dict = json.loads(tool_result)
-                # Call your existing function
-                log_id = save_to_json(tool_result_dict)
-                print("✅ Valid JSON:")
-            else:
-                print("❌ Not valid JSON:")
-
-
-            
-        log_input = ''
-        if log_id:
-            log_input = f"<a href='{APP_URL}documents/{log_id}'>Click here to view the Log input to LLM</a>"
+              
         for chunk in llm_with_tools.stream(messages):
             if isinstance(chunk, AIMessageChunk) and chunk.content:
                 final_response_content += chunk.content
@@ -1068,18 +1067,6 @@ def build_stream_response(llm_with_tools, messages, ai_msg, session_id, chat_sys
             # Save token usage
             response_type = 'Tool Usage' if ai_msg.tool_calls else 'General Conversation'
             tools_used = len(ai_msg.tool_calls) > 0 if ai_msg.tool_calls else False
-            tokenresponse[session_id].update({
-                'total_tokens': usage_metadata['total_tokens'],
-                'input_tokens': usage_metadata['input_tokens'],
-                'output_tokens': usage_metadata['output_tokens'],
-                'response_type': response_type,
-                'tools_used': tools_used,
-                'source': chat_system,
-                'run_id': run_id,
-                'log_input': log_input
-            })
-
-
             
             if chat_system == "Tool call - Name Validation": 
                 first_name = extract_name(final_response_content)
@@ -1100,7 +1087,9 @@ def build_stream_response(llm_with_tools, messages, ai_msg, session_id, chat_sys
 
                 except Exception as e:
                     yield f"\n[PDF generation failed: {str(e)}]"
-
+            messages.append(
+                AIMessage(content=final_response_content)
+            )
             messagedata[session_id].append({
                 "message_type": "ai",
                 "content": final_response_content,
@@ -1118,7 +1107,22 @@ def build_stream_response(llm_with_tools, messages, ai_msg, session_id, chat_sys
 
             save_message_to_db(session, messagedata, run_id, count)
 
-            
+            json_ready_messages = serialize_messages(messages)
+            log_id = save_to_json(json_ready_messages)
+                
+            log_input = ''
+            if log_id:
+                log_input = f"<a href='{APP_URL}documents/{log_id}'>Click here to view the Log input to LLM</a>"
+            tokenresponse[session_id].update({
+                'total_tokens': usage_metadata['total_tokens'],
+                'input_tokens': usage_metadata['input_tokens'],
+                'output_tokens': usage_metadata['output_tokens'],
+                'response_type': response_type,
+                'tools_used': tools_used,
+                'source': chat_system,
+                'run_id': run_id,
+                'log_input': log_input
+            })
 
     except (OpenAIError, APITimeoutError) as e:
         yield f"\n[Error occurred: {str(e)}]"
@@ -1535,7 +1539,7 @@ def yield_runtime_status(message, delay=0.1):
 
 def save_to_json(data: dict) -> str:
     json_id = str(uuid.uuid4())
-    file_name = f"comparison_result_{json_id}.json"
+    file_name = f"request_data_{json_id}.json"
     file_path = os.path.join("documents", file_name)
 
     # Ensure folder exists
@@ -1572,3 +1576,49 @@ def is_valid_json(data: str) -> bool:
         return True
     except (ValueError, TypeError):
         return False
+
+def serialize_messages(messages):
+    """
+    Convert LangChain messages into proper JSON format.
+    Handles dict-like strings and ensures content is always valid.
+    """
+    json_ready = []
+
+    for msg in messages:
+        # ---- role mapping ----
+        if isinstance(msg, HumanMessage):
+            role = "human"
+        elif isinstance(msg, AIMessage):
+            role = "ai"
+        elif isinstance(msg, SystemMessage):
+            role = "system"
+        else:
+            role = "tool"
+
+        # ---- initialize content safely ----
+        content = msg.content if hasattr(msg, "content") else ""
+
+        # ---- try JSON parsing ----
+        if isinstance(content, str):
+            parsed = None
+            try:
+                # 1️⃣ Try JSON first
+                parsed = json.loads(content)
+            except Exception:
+                try:
+                    # 2️⃣ Try Python dict string (single quotes → dict)
+                    parsed = ast.literal_eval(content)
+                except Exception:
+                    pass
+
+            if isinstance(parsed, (dict, list)):
+                content = parsed   # keep JSON object
+            else:
+                content = content  # leave as string
+
+        json_ready.append({
+            "role": role,
+            "content": content
+        })
+
+    return json_ready
