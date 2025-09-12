@@ -27,9 +27,17 @@ import xml.etree.ElementTree as ET
 from bs4 import BeautifulSoup
 from django.utils import timezone
 import os
+import re
 
 from langchain_chroma import Chroma
 from langchain_openai import OpenAIEmbeddings
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import (
+    MarkdownHeaderTextSplitter,
+    HTMLHeaderTextSplitter,
+    CharacterTextSplitter
+)
+from langchain.docstore.document import Document as LangchainDocument
 
 # -------------------------------
 # Global variables
@@ -63,7 +71,6 @@ vectorstore = Chroma(
     persist_directory=CHROMA_DB_PATH,
 )
 
-
 # -------------------------------
 # Document storage configuration
 # -------------------------------
@@ -85,15 +92,21 @@ def extract_text_from_file(file_path: str, file_type: str) -> str:
             text = ""
             with open(file_path, 'rb') as f:
                 reader = PyPDF2.PdfReader(f)
-                for page in reader.pages:
-                    text += page.extract_text() + "\n"
+                for page_num, page in enumerate(reader.pages):
+                    page_text = page.extract_text()
+                    # Add page markers for better splitting
+                    text += f"\n\n--- Page {page_num + 1} ---\n\n" + page_text + "\n"
             return text
         
         elif file_type in ['doc', 'docx']:
             doc = docx.Document(file_path)
             text = ""
             for paragraph in doc.paragraphs:
-                text += paragraph.text + "\n"
+                # Preserve heading structure for chapter detection
+                if paragraph.style.name.startswith('Heading'):
+                    text += f"\n\n# {paragraph.text}\n\n"
+                else:
+                    text += paragraph.text + "\n"
             return text
         
         elif file_type == 'html':
@@ -118,7 +131,7 @@ def extract_text_from_file(file_path: str, file_type: str) -> str:
             text = ""
             for sheet_name in workbook.sheetnames:
                 sheet = workbook[sheet_name]
-                text += f"Sheet: {sheet_name}\n"
+                text += f"\n\n# Sheet: {sheet_name}\n\n"
                 for row in sheet.iter_rows(values_only=True):
                     if row:
                         text += ", ".join([str(cell) if cell is not None else "" for cell in row]) + "\n"
@@ -127,7 +140,8 @@ def extract_text_from_file(file_path: str, file_type: str) -> str:
         elif file_type in ['ppt', 'pptx']:
             prs = Presentation(file_path)
             text = ""
-            for slide in prs.slides:
+            for slide_num, slide in enumerate(prs.slides):
+                text += f"\n\n# Slide {slide_num + 1}\n\n"
                 for shape in slide.shapes:
                     if hasattr(shape, "text"):
                         text += shape.text + "\n"
@@ -140,84 +154,235 @@ def extract_text_from_file(file_path: str, file_type: str) -> str:
         print(f"Error extracting text from {file_path}: {str(e)}")
         return ""
 
-def chunk_text(text: str, chunk_size: int = 1000, overlap: int = 200) -> List[str]:
-    """Split text into overlapping chunks for better embedding."""
-    if len(text) <= chunk_size:
-        return [text]
-    
-    chunks = []
-    start = 0
-    
-    while start < len(text):
-        end = start + chunk_size
-        
-        # Try to end at a sentence boundary
-        if end < len(text):
-            # Look for sentence endings within the last 100 characters
-            last_period = text.rfind('.', start + chunk_size - 100, end)
-            last_exclamation = text.rfind('!', start + chunk_size - 100, end)
-            last_question = text.rfind('?', start + chunk_size - 100, end)
-            
-            sentence_end = max(last_period, last_exclamation, last_question)
-            if sentence_end > start:
-                end = sentence_end + 1
-        
-        chunk = text[start:end].strip()
-        if chunk:
-            chunks.append(chunk)
-        
-        # Move start position with overlap
-        start = max(start + chunk_size - overlap, end)
-        if start >= len(text):
-            break
-    
-    return chunks
+# -------------------------------
+# Enhanced Chapter-wise Text Splitting Functions
+# -------------------------------
 
-def get_embeddings(texts: List[str]) -> List[List[float]]:
-    """Generate embeddings for a list of texts using OpenAI."""
+def detect_chapter_patterns(text: str, file_type: str) -> List[str]:
+    """Detect chapter/section patterns based on file type and content."""
+    patterns = []
+    
+    # Common chapter patterns
+    common_patterns = [
+        r'^(Chapter\s+\d+[:\.\s])',
+        r'^(CHAPTER\s+\d+[:\.\s])',
+        r'^(Ch\.\s*\d+[:\.\s])',
+        r'^(\d+\.\s+)',
+        r'^(Part\s+\d+[:\.\s])',
+        r'^(Section\s+\d+[:\.\s])',
+        r'^(Unit\s+\d+[:\.\s])',
+    ]
+    
+    # Markdown-style headers
+    markdown_patterns = [
+        r'^(#{1,6}\s+)',  # # Header, ## Header, etc.
+    ]
+    
+    # HTML headers (if HTML content)
+    if file_type == 'html':
+        patterns.extend([
+            r'<h[1-6][^>]*>',
+        ])
+    else:
+        patterns.extend(common_patterns + markdown_patterns)
+    
+    return patterns
+
+def split_text_by_chapters(text: str, file_type: str, doc_metadata: Dict) -> List[LangchainDocument]:
+    """Split text into chapters/sections using LangChain text splitters."""
+    documents = []
+    
     try:
-        response = openai.embeddings.create(
-            model=EMBEDDING_MODEL,
-            input=texts
-        )
-        return [embedding.embedding for embedding in response.data]
+        # For HTML files, use HTMLHeaderTextSplitter
+        if file_type == 'html':
+            headers_to_split_on = [
+                ("h1", "Header 1"),
+                ("h2", "Header 2"),
+                ("h3", "Header 3"),
+                ("h4", "Header 4"),
+            ]
+            html_splitter = HTMLHeaderTextSplitter(headers_to_split_on=headers_to_split_on)
+            html_header_splits = html_splitter.split_text(text)
+            
+            for i, doc in enumerate(html_header_splits):
+                metadata = doc_metadata.copy()
+                metadata.update({
+                    'chunk_type': 'html_section',
+                    'chunk_index': i,
+                    'section_header': doc.metadata.get('Header 1', '') or doc.metadata.get('Header 2', ''),
+                })
+                doc.metadata = metadata
+                documents.append(doc)
+        
+        # For Markdown-like content, try MarkdownHeaderTextSplitter
+        elif '# ' in text or '## ' in text:
+            headers_to_split_on = [
+                ("#", "Header 1"),
+                ("##", "Header 2"), 
+                ("###", "Header 3"),
+                ("####", "Header 4"),
+            ]
+            markdown_splitter = MarkdownHeaderTextSplitter(
+                headers_to_split_on=headers_to_split_on,
+                strip_headers=False
+            )
+            md_header_splits = markdown_splitter.split_text(text)
+            
+            for i, doc in enumerate(md_header_splits):
+                metadata = doc_metadata.copy()
+                metadata.update({
+                    'chunk_type': 'markdown_section',
+                    'chunk_index': i,
+                    'section_header': doc.metadata.get('Header 1', '') or doc.metadata.get('Header 2', ''),
+                })
+                doc.metadata = metadata
+                documents.append(doc)
+        
+        # For other files, try chapter pattern detection
+        else:
+            chapter_splits = split_by_chapter_patterns(text, file_type, doc_metadata)
+            if len(chapter_splits) > 1:
+                documents.extend(chapter_splits)
+            else:
+                # Fall back to recursive character splitting
+                documents.extend(fallback_recursive_split(text, doc_metadata))
+        
+        # If no documents were created, use fallback
+        if not documents:
+            documents.extend(fallback_recursive_split(text, doc_metadata))
+            
     except Exception as e:
-        print(f"Error generating embeddings: {str(e)}")
-        return []
+        print(f"Error in chapter splitting: {str(e)}")
+        documents.extend(fallback_recursive_split(text, doc_metadata))
+    
+    return documents
+
+def split_by_chapter_patterns(text: str, file_type: str, doc_metadata: Dict) -> List[LangchainDocument]:
+    """Split text by detected chapter patterns."""
+    documents = []
+    patterns = detect_chapter_patterns(text, file_type)
+    
+    # Try each pattern to find the best split
+    for pattern in patterns:
+        try:
+            # Find all matches
+            matches = list(re.finditer(pattern, text, re.MULTILINE | re.IGNORECASE))
+            
+            if len(matches) >= 2:  # At least 2 chapters found
+                for i, match in enumerate(matches):
+                    start_pos = match.start()
+                    end_pos = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+                    
+                    chapter_text = text[start_pos:end_pos].strip()
+                    if len(chapter_text) > 100:  # Minimum chapter length
+                        
+                        # Extract chapter title
+                        chapter_title = match.group(1).strip() if match.groups() else f"Section {i+1}"
+                        
+                        metadata = doc_metadata.copy()
+                        metadata.update({
+                            'chunk_type': 'chapter',
+                            'chunk_index': i,
+                            'chapter_title': chapter_title,
+                            'chapter_number': i + 1,
+                        })
+                        
+                        doc = LangchainDocument(
+                            page_content=chapter_text,
+                            metadata=metadata
+                        )
+                        documents.append(doc)
+                
+                if documents:
+                    return documents  # Return if successful split found
+                    
+        except Exception as e:
+            print(f"Error with pattern {pattern}: {str(e)}")
+            continue
+    
+    return documents
+
+def fallback_recursive_split(text: str, doc_metadata: Dict) -> List[LangchainDocument]:
+    """Fallback to recursive character text splitting."""
+    try:
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1500,
+            chunk_overlap=200,
+            length_function=len,
+            separators=["\n\n", "\n", ". ", " ", ""]
+        )
+        
+        splits = text_splitter.split_text(text)
+        documents = []
+        
+        for i, split in enumerate(splits):
+            metadata = doc_metadata.copy()
+            metadata.update({
+                'chunk_type': 'recursive_split',
+                'chunk_index': i,
+                'chunk_size': len(split),
+            })
+            
+            doc = LangchainDocument(
+                page_content=split,
+                metadata=metadata
+            )
+            documents.append(doc)
+        
+        return documents
+        
+    except Exception as e:
+        print(f"Error in fallback splitting: {str(e)}")
+        # Last resort: return single document
+        metadata = doc_metadata.copy()
+        metadata.update({
+            'chunk_type': 'single_document',
+            'chunk_index': 0,
+        })
+        
+        return [LangchainDocument(page_content=text, metadata=metadata)]
 
 def store_document_embeddings(doc_dict: dict, text_content: str):
-    """Store document embeddings in Chroma DB."""
+    """Store document embeddings in Chroma DB with chapter-wise splitting."""
     try:
-        # Chunk the text
-        chunks = chunk_text(text_content)
-        if not chunks:
+        # Prepare base metadata
+        base_metadata = {
+            "document_id": doc_dict.get("document_id", ""),
+            "session_id": doc_dict.get("session_id", ""),
+            "original_name": doc_dict.get("original_name", ""),
+            "file_name": doc_dict.get("file_name", ""),
+            "file_size": int(doc_dict.get("file_size", 0)),
+            "file_type": doc_dict.get("file_type", ""),
+            "mime_type": doc_dict.get("mime_type", "application/octet-stream"),
+            "file_path": doc_dict.get("file_path", ""),
+            "url": doc_dict.get("url", ""),
+            "upload_date": timezone.now().isoformat(),
+        }
+        
+        # Split text by chapters/sections
+        documents = split_text_by_chapters(text_content, doc_dict.get("file_type", ""), base_metadata)
+        
+        if not documents:
             return False
         
-        # Prepare metadata
+        # Prepare data for Chroma
+        texts = []
         metadatas = []
-        for i, chunk in enumerate(chunks):
-            metadatas.append({
-                "document_id": doc_dict.get("document_id", ""),
-                "session_id": doc_dict.get("session_id", ""),
-                "original_name": doc_dict.get("original_name", ""),
-                "file_name": doc_dict.get("file_name", ""),
-                "file_size": int(doc_dict.get("file_size", 0)),
-                "file_type": doc_dict.get("file_type", ""),
-                "mime_type": doc_dict.get("mime_type", "application/octet-stream"),
-                "content": doc_dict.get("content", ""),
-                "file_path": doc_dict.get("file_path", ""),
-                "url": doc_dict.get("url", ""),
-                "chunk_index": int(i),
-                "chunk_text": chunk[:500] if chunk else "",
-                "upload_date": timezone.now().isoformat(),
-            })
-
-        # ✅ Add to Chroma via LangChain
+        ids = []
+        
+        for doc in documents:
+            texts.append(doc.page_content)
+            metadatas.append(doc.metadata)
+            ids.append(f"{doc_dict.get('document_id')}_{doc.metadata.get('chunk_index', 0)}")
+        
+        # Add to Chroma via LangChain
         vectorstore.add_texts(
-            texts=chunks,
+            texts=texts,
             metadatas=metadatas,
-            ids=[f"{doc_dict.get('document_id')}_{i}" for i in range(len(chunks))]
+            ids=ids
         )
+        
+        print(f"Successfully stored {len(documents)} chunks for document {doc_dict.get('original_name')}")
         return True
         
     except Exception as e:
@@ -270,7 +435,7 @@ def upload_documents(request):
         'txt', 'pdf', 'doc', 'docx', 'html', 'css', 'js', 
         'json', 'xml', 'csv', 'xlsx', 'ppt', 'pptx'
     }
-    MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
+    MAX_FILE_SIZE = 50 * 1024 * 1024  # 10MB
     
     files = request.FILES.getlist('documents')
     session_id = request.POST.get('session_id')  # Optional session association
@@ -287,7 +452,7 @@ def upload_documents(request):
         try:
             # Validate file size
             if file.size > MAX_FILE_SIZE:
-                errors.append(f"File '{file.name}' is too large (max 10MB)")
+                errors.append(f"File '{file.name}' is too large (max 50MB)")
                 continue
             
             # Validate file extension
@@ -322,8 +487,7 @@ def upload_documents(request):
                 "url": fs.url(filename) if hasattr(fs, "url") else None,
             }
 
-            
-            # Generate and store embeddings in Chroma
+            # Generate and store embeddings in Chroma (with chapter-wise splitting)
             embedding_success = store_document_embeddings(doc_dict, text_content)
             
             # Prepare response entry
@@ -333,6 +497,7 @@ def upload_documents(request):
                 'size': file.size,
                 'type': file_extension,
                 'upload_date': datetime.now().isoformat(),
+                'embedding_success': embedding_success,
             })
 
         except Exception as e:
@@ -351,38 +516,58 @@ def upload_documents(request):
 # -------------------------------
 @csrf_exempt
 def list_documents(request):
-    """Return list of uploaded documents from Django DB (sorted by newest first)."""
+    """Return list of uploaded documents from Chroma with chapter information."""
     if request.method != 'GET':
         return JsonResponse({'success': False, 'error': 'Only GET requests allowed'})
     
-    # Fetch all documents metadata from Chroma
-    all_docs = vectorstore._collection.get(include=["metadatas"])   
+    try:
+        # Fetch all documents metadata from Chroma
+        all_docs = vectorstore._collection.get(include=["metadatas"])   
 
-    # Dict to keep only one entry per document_id
-    unique_docs = {}
+        # Dict to keep only one entry per document_id with chapter count
+        unique_docs = {}
 
-    for metadata in all_docs.get("metadatas", []):
-        if metadata:
-            doc_id = metadata.get("document_id")
-            if doc_id and doc_id not in unique_docs:
-                unique_docs[doc_id] = {
-                    "id": doc_id,
-                    "name": metadata.get("original_name", ""),
-                    "size": metadata.get("file_size", 0),
-                    "type": metadata.get("file_type", ""),
-                    "upload_date": metadata.get("upload_date", ""),
-                    "mime_type": metadata.get("mime_type", "application/octet-stream"),
-                }
+        for metadata in all_docs.get("metadatas", []):
+            if metadata:
+                doc_id = metadata.get("document_id")
+                if doc_id:
+                    if doc_id not in unique_docs:
+                        unique_docs[doc_id] = {
+                            "id": doc_id,
+                            "name": metadata.get("original_name", ""),
+                            "size": metadata.get("file_size", 0),
+                            "type": metadata.get("file_type", ""),
+                            "upload_date": metadata.get("upload_date", ""),
+                            "mime_type": metadata.get("mime_type", "application/octet-stream"),
+                            "chunk_count": 0,
+                            "chunk_types": set(),
+                        }
+                    
+                    # Count chunks and track chunk types
+                    unique_docs[doc_id]["chunk_count"] += 1
+                    chunk_type = metadata.get("chunk_type", "unknown")
+                    unique_docs[doc_id]["chunk_types"].add(chunk_type)
 
-    # Convert dict → list of unique docs
-    results = list(unique_docs.values())
+        # Convert set to list for JSON serialization
+        for doc in unique_docs.values():
+            doc["chunk_types"] = list(doc["chunk_types"])
 
+        # Convert dict → list of unique docs
+        results = list(unique_docs.values())
 
-    return JsonResponse({
-        'success': True,
-        'documents': results,
-        'total_count': len(results)
-    })
+        return JsonResponse({
+            'success': True,
+            'documents': results,
+            'total_count': len(results)
+        })
+        
+    except Exception as e:
+        return JsonResponse({
+            'success': False,
+            'error': f"Error fetching documents: {str(e)}",
+            'documents': [],
+            'total_count': 0
+        })
 
 # -------------------------------
 # Delete document (updated for Chroma)
@@ -399,13 +584,15 @@ def delete_document(request):
     
     try:
         original_name = None
+        chunk_count = 0
 
-        # ✅ Fetch metadata for this document before deleting
+        # Fetch metadata for this document before deleting
         try:
             chunk_results = vectorstore._collection.get(
                 where={"document_id": str(document_id)},
                 include=["metadatas"]
             )
+            chunk_count = len(chunk_results.get("metadatas", []))
             for metadata in chunk_results.get("metadatas", []):
                 if metadata and "original_name" in metadata:
                     original_name = metadata["original_name"]
@@ -413,7 +600,7 @@ def delete_document(request):
         except Exception as e:
             print(f"Error fetching metadata from Chroma: {str(e)}")
 
-        # ✅ Delete from Chroma
+        # Delete from Chroma
         try:
             vectorstore._collection.delete(where={"document_id": str(document_id)})
         except Exception as e:
@@ -424,7 +611,7 @@ def delete_document(request):
 
         return JsonResponse({
             'success': True,
-            'message': f"Document '{original_name}' deleted successfully from Chroma"
+            'message': f"Document '{original_name}' with {chunk_count} chunks deleted successfully from Chroma"
         })
     
     except Exception as e:
@@ -489,10 +676,10 @@ def download_document(request, doc_id):
         raise Http404("File not found on server")
 
 # -------------------------------
-# Get document content for RAG
+# Enhanced RAG functions
 # -------------------------------
 def get_relevant_documents(query: str, session_id: str = None, n_results: int = 5) -> List[Dict[str, Any]]:
-    """Get relevant documents for RAG using semantic search."""
+    """Get relevant documents for RAG using semantic search with chapter information."""
     try:
         results = vectorstore.similarity_search_with_score(query, k=n_results)
 
@@ -504,6 +691,11 @@ def get_relevant_documents(query: str, session_id: str = None, n_results: int = 
                 "source": metadata.get("original_name", ""),
                 "file_type": metadata.get("file_type", ""),
                 "document_id": metadata.get("document_id", ""),
+                "chunk_type": metadata.get("chunk_type", ""),
+                "chunk_index": metadata.get("chunk_index", 0),
+                "chapter_title": metadata.get("chapter_title", ""),
+                "chapter_number": metadata.get("chapter_number", ""),
+                "section_header": metadata.get("section_header", ""),
                 "similarity": 1 - score
             })
 
@@ -512,3 +704,48 @@ def get_relevant_documents(query: str, session_id: str = None, n_results: int = 
     except Exception as e:
         print(f"Error retrieving relevant documents: {str(e)}")
         return []
+
+@csrf_exempt
+def get_document_chapters(request):
+    """Get chapter/section information for a specific document."""
+    if request.method != 'GET':
+        return JsonResponse({'success': False, 'error': 'Only GET requests allowed'})
+    
+    document_id = request.GET.get('document_id', '').strip()
+    if not document_id:
+        return JsonResponse({'success': False, 'error': 'Document ID required'})
+    
+    try:
+        # Fetch all chunks for this document
+        chunk_results = vectorstore._collection.get(
+            where={"document_id": str(document_id)},
+            include=["metadatas"]
+        )
+        
+        chapters = []
+        for metadata in chunk_results.get("metadatas", []):
+            if metadata:
+                chapter_info = {
+                    "chunk_index": metadata.get("chunk_index", 0),
+                    "chunk_type": metadata.get("chunk_type", ""),
+                    "chapter_title": metadata.get("chapter_title", ""),
+                    "chapter_number": metadata.get("chapter_number", ""),
+                    "section_header": metadata.get("section_header", ""),
+                }
+                chapters.append(chapter_info)
+        
+        # Sort by chunk_index
+        chapters.sort(key=lambda x: x["chunk_index"])
+        
+        return JsonResponse({
+            'success': True,
+            'document_id': document_id,
+            'chapters': chapters,
+            'total_chapters': len(chapters)
+        })
+        
+    except Exception as e:
+        return JsonResponse({
+            'success': False,
+            'error': f"Error fetching chapters: {str(e)}"
+        })

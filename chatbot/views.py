@@ -25,6 +25,7 @@ warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 # Parsing HTML
 from bs4 import BeautifulSoup
 import ast
+from typing import List, Dict, Any
 
 # LangChain & OpenAI integration
 from langchain_openai import ChatOpenAI
@@ -575,6 +576,7 @@ def chatbot_input(request):
         match = url_pattern.search(usermessage)
         ids_str = ''
         documentid = ""
+        reg_result = {}
         if match:
             # Extract just the document_id values
             document_ids = set()
@@ -586,6 +588,13 @@ def chatbot_input(request):
             ids_str = ", ".join(ids)
             if ids_str:
                 documentid = f"against the document id {ids_str}"
+
+            
+            reg_result = get_relevant_documents(usermessage,session_id)
+
+            
+
+
 
 
         # Initialize or get existing chat history for this session
@@ -745,7 +754,7 @@ def chatbot_input(request):
                         # Sitemap Tool One by One URL Response
                         if chat_system == "Tool call - URL Validation with documents":
                             return StreamingHttpResponse(
-                                sitemap_stream_static_message(llm_with_tools, tool_result, ai_msg, session_id, chat_system, count,tool_call_id,messages),
+                                sitemap_stream_static_message(llm_with_tools, tool_result, ai_msg, session_id, chat_system, count,tool_call_id,messages,reg_result),
                                 content_type='text/plain'
                             )    
                         
@@ -849,7 +858,7 @@ def stream_static_message(message):
         if word.endswith('\n') or word.endswith('**') or word.endswith('!'):
             time.sleep(0.1)
 
-def sitemap_stream_static_message(llm_with_tools, tool_result, ai_msg, session_id, chat_system, count,tool_call_id,messages):
+def sitemap_stream_static_message(llm_with_tools, tool_result, ai_msg, session_id, chat_system, count,tool_call_id,messages,reg_result):
     
     """Stream a static message with typing effect"""
     
@@ -891,7 +900,8 @@ def sitemap_stream_static_message(llm_with_tools, tool_result, ai_msg, session_i
                 })
                 comparison_result[linkurl] = {
                     "url": linkurl,
-                    "document_ids": ", ".join(document_ids),
+                    #"document_ids": ", ".join(document_ids),
+                    "document_content":reg_result,
                     "validate_url_result" : valid_url,
                 }
             yield yield_runtime_status("📋 Preparing detailed analysis...")
@@ -927,7 +937,8 @@ def sitemap_stream_static_message(llm_with_tools, tool_result, ai_msg, session_i
             parsed_data = json.loads(pre_result)
             comparison_result[url] = {
                 "url": url,
-                "document_ids": ", ".join(document_ids),
+                #"document_ids": ", ".join(document_ids),
+                "document_content":reg_result,
                 "validate_url_result" : valid_url,
                 "validation": parsed_data.get("validation", {}),
                 "seo_analysis": {
@@ -1622,3 +1633,34 @@ def serialize_messages(messages):
         })
 
     return json_ready
+
+
+# -------------------------------
+# Enhanced RAG functions
+# -------------------------------
+def get_relevant_documents(query: str, session_id: str = None, n_results: int = 5) -> List[Dict[str, Any]]:
+    """Get relevant documents for RAG using semantic search with chapter information."""
+    try:
+        results = vectorstore.similarity_search_with_score(query, k=n_results)
+
+        relevant_docs = []
+        for doc, score in results:
+            metadata = doc.metadata
+            relevant_docs.append({
+                "content": doc.page_content,
+                "source": metadata.get("original_name", ""),
+                "file_type": metadata.get("file_type", ""),
+                "document_id": metadata.get("document_id", ""),
+                "chunk_type": metadata.get("chunk_type", ""),
+                "chunk_index": metadata.get("chunk_index", 0),
+                "chapter_title": metadata.get("chapter_title", ""),
+                "chapter_number": metadata.get("chapter_number", ""),
+                "section_header": metadata.get("section_header", ""),
+                "similarity": 1 - score
+            })
+
+        return relevant_docs
+        
+    except Exception as e:
+        print(f"Error retrieving relevant documents: {str(e)}")
+        return []
