@@ -31,7 +31,7 @@ import re
 
 from langchain_chroma import Chroma
 from langchain_openai import OpenAIEmbeddings
-from langchain_community.document_loaders import PyPDFLoader, Docx2txtLoader, TextLoader, CSVLoader
+from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.schema import Document as LCDocument
 
@@ -75,7 +75,7 @@ vectorstore = Chroma(
 text_splitter = RecursiveCharacterTextSplitter(
     chunk_size=1500,
     chunk_overlap=200,
-    separators=["\n\n", "\n"]
+    separators=["\n\n", "\n", ". ", " ", ""]
 )
 
 # -------------------------------
@@ -85,72 +85,6 @@ UPLOAD_DIR = os.path.join(settings.MEDIA_ROOT, 'documents')
 if not os.path.exists(UPLOAD_DIR):
     os.makedirs(UPLOAD_DIR)
 
-
-def extract_text_and_split(file_path, file_extension, base_metadata):
-    """
-    Extract text based on file type and split by paragraphs.
-    """
-    docs = []
-
-    # PDF
-    if file_extension == "pdf":
-        loader = PyPDFLoader(file_path)
-        pages = loader.load()
-        for i, page in enumerate(pages):
-            paragraphs = [p.strip() for p in page.page_content.split("\n\n") if p.strip()]
-            for j, para in enumerate(paragraphs):
-                meta = base_metadata.copy()
-                meta.update({
-                    "page": i,
-                    "chunk_index": j,
-                    "chunk_type": "paragraph",
-                    "chunk_size": len(para),
-                })
-                docs.append(LCDocument(page_content=para, metadata=meta))
-
-    # DOCX
-    elif file_extension == "docx":
-        loader = Docx2txtLoader(file_path)
-        pages = loader.load()
-        text = " ".join([p.page_content for p in pages])
-        paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
-        for i, para in enumerate(paragraphs):
-            meta = base_metadata.copy()
-            meta.update({
-                "chunk_index": i,
-                "chunk_type": "paragraph",
-                "chunk_size": len(para),
-            })
-            docs.append(LCDocument(page_content=para, metadata=meta))
-
-    # TXT
-    elif file_extension == "txt":
-        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-            content = f.read()
-        paragraphs = [p.strip() for p in content.split("\n\n") if p.strip()]
-        for i, para in enumerate(paragraphs):
-            meta = base_metadata.copy()
-            meta.update({
-                "chunk_index": i,
-                "chunk_type": "paragraph",
-                "chunk_size": len(para),
-            })
-            docs.append(LCDocument(page_content=para, metadata=meta))
-
-    # CSV (each row as a paragraph)
-    elif file_extension == "csv":
-        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-            rows = f.readlines()
-        for i, row in enumerate(rows):
-            meta = base_metadata.copy()
-            meta.update({
-                "chunk_index": i,
-                "chunk_type": "row",
-                "chunk_size": len(row),
-            })
-            docs.append(LCDocument(page_content=row.strip(), metadata=meta))
-
-    return docs
 
 # -------------------------------
 # Chat history view
@@ -233,29 +167,39 @@ def upload_documents(request):
             filename = fs.save(file_name, file)
             file_path = fs.path(filename)
             
-            # loader = PyPDFLoader(file_path)
-            # chunk_documents = loader.load()
+            loader = PyPDFLoader(file_path)
+            chunk_documents = loader.load()
             
 
-            base_metadata = {
-                "document_id": str(unique_id),
-                "session_id": str(session.session_id) if session else None,
-                "original_name": file.name,
-                "file_name": filename,
-                "file_size": file.size,
-                "file_type": file_extension,
-                "mime_type": mimetypes.guess_type(file.name)[0] or "application/octet-stream",
-                "file_path": file_path,
-                "url": fs.url(filename) if hasattr(fs, "url") else None,
-                "upload_date": timezone.now().isoformat()
-            }
-
-
-            docs = extract_text_and_split(file_path, file_extension, base_metadata)
-            
+            docs = text_splitter.split_documents(chunk_documents)
             vectorstore.add_documents(docs)
 
-            print(f"Split into {len(docs)} chunks with metadata")
+            print(f"Split into {len(docs)} chunks")
+
+            # Add metadata to each chunk
+            enriched_docs = []
+            for i, d in enumerate(docs):
+                metadata = {
+                    "document_id": str(unique_id),
+                    "session_id": str(session.session_id) if session else None,
+                    "original_name": file.name,
+                    "file_name": filename,
+                    "file_size": file.size,
+                    "file_type": file_extension,
+                    "mime_type": mimetypes.guess_type(file.name)[0] or "application/octet-stream",
+                    "file_path": file_path,
+                    "url": fs.url(filename) if hasattr(fs, "url") else None,
+                    "upload_date": timezone.now().isoformat(),
+                    "chunk_index": i,
+                    "chunk_type": "text",
+                    "chunk_size": len(d.page_content),
+                }
+                enriched_docs.append(LCDocument(page_content=d.page_content, metadata=metadata))
+            
+            # Store in Chroma
+            vectorstore.add_documents(enriched_docs)
+
+            print(f"Split into {len(enriched_docs)} chunks with metadata")
             
             # Prepare response entry
             uploaded_files.append({

@@ -13,7 +13,9 @@ langchain-chroma
 openai
 chromadb
 PyPDF2
+PyPDF
 python-docx
 openpyxl
 python-pptx
 psycopg2-binary
+langchain-experimental

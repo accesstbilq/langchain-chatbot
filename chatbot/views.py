@@ -1638,7 +1638,7 @@ def serialize_messages(messages):
 # -------------------------------
 # Enhanced RAG functions
 # -------------------------------
-def get_relevant_documents(query: str, session_id: str = None, n_results: int = 1) -> List[Dict[str, Any]]:
+def get_relevant_documents(query: str, session_id: str = None, n_results: int = 5) -> List[Dict[str, Any]]:
     """Get relevant documents for RAG using semantic search with chapter information."""
     try:
         results = vectorstore.similarity_search(query, k=n_results)
