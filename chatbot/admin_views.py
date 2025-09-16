@@ -49,7 +49,7 @@ load_dotenv()
 OPENAIKEY = os.getenv('OPEN_AI_KEY')
 MODEL = "gpt-4.1"
 EMBEDDING_MODEL = "text-embedding-3-small"
-
+APP_URL = "http://127.0.0.1:8000/"
 # Initialize OpenAI client
 openai.api_key = OPENAIKEY
 
@@ -152,6 +152,47 @@ def extract_text_and_split(file_path, file_extension, base_metadata):
 
     return docs
 
+
+def save_docs_to_json_and_chroma(docs, base_dir="documents", filename=None):
+    """
+    Save docs into JSON file and also into ChromaDB with extra metadata.
+    """
+    # Ensure folder exists
+    if not os.path.exists(base_dir):
+        os.makedirs(base_dir)
+
+    # Generate unique JSON filename if not provided
+    if not filename:
+        json_id = str(uuid.uuid4())
+        filename = f"chunk_data_{json_id}.json"
+
+    output_file = os.path.join(base_dir, filename)
+
+    enriched_docs = []
+    data = []
+    for doc in docs:
+        meta = doc.metadata.copy()
+        meta["json_file"] = filename   # ✅ add JSON file name to metadata
+        data.append({
+            "metadata": meta,
+            "page_content": doc.page_content
+        })
+        enriched_docs.append(LCDocument(page_content=doc.page_content, metadata=meta))
+
+    # Save JSON file
+    with open(output_file, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4, ensure_ascii=False)
+
+    print(f"✅ Saved {len(docs)} chunks into {output_file}")
+
+    # Save into Chroma
+    vectorstore.add_documents(enriched_docs)
+    print(f"✅ Stored {len(enriched_docs)} chunks in ChromaDB")
+
+    return output_file
+
+
+
 # -------------------------------
 # Chat history view
 # -------------------------------
@@ -252,8 +293,7 @@ def upload_documents(request):
 
 
             docs = extract_text_and_split(file_path, file_extension, base_metadata)
-            
-            vectorstore.add_documents(docs)
+            savefile = save_docs_to_json_and_chroma(docs, base_dir="documents")
 
             print(f"Split into {len(docs)} chunks with metadata")
             
@@ -263,6 +303,7 @@ def upload_documents(request):
                 'name': file.name,
                 'size': file.size,
                 'type': file_extension,
+                'savefile': savefile,
                 'upload_date': datetime.now().isoformat(),
             })
 
@@ -305,6 +346,7 @@ def list_documents(request):
                             "type": metadata.get("file_type", ""),
                             "upload_date": metadata.get("upload_date", ""),
                             "mime_type": metadata.get("mime_type", "application/octet-stream"),
+                            "json_file": metadata.get("json_file", ""),
                             "chunk_count": 0,
                             "chunk_types": set(),
                         }
@@ -440,3 +482,9 @@ def download_document(request, doc_id):
         raise Http404("Document not found")
     except FileNotFoundError:
         raise Http404("File not found on server")
+    
+def chunk_document(request, filename):
+    file_path = os.path.join(settings.BASE_DIR, "documents", filename)
+    if os.path.exists(file_path):
+        return FileResponse(open(file_path, "rb"), as_attachment=True, filename=filename)
+    raise Http404("File not found")

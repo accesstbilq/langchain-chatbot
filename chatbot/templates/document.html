@@ -181,6 +181,11 @@
                                 <div class="doc-meta">
                                     ${formatFileSize(doc.size)} • ${formatDate(doc.upload_date)}
                                 </div>
+                                <div class="doc-meta">
+                                    <a href="/documents/files/${doc.json_file}" download>
+                                        Download the Chunks JSON file
+                                    </a>
+                                </div>
                             </div>
                             <button class="delete-btn" onclick="deleteDocument('${doc.id}')">
                                 🗑️
