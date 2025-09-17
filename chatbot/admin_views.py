@@ -13,27 +13,26 @@ import mimetypes
 import uuid
 from .models import ChatSession, ChatMessage, Document
 from django.http import FileResponse, Http404
-import chromadb
-from chromadb.config import Settings
 import openai
 from typing import List, Dict, Any
 import json
-import PyPDF2
-import docx
-import csv
-import openpyxl
-from pptx import Presentation
-import xml.etree.ElementTree as ET
-from bs4 import BeautifulSoup
 from django.utils import timezone
 import os
 import re
+from pydantic import BaseModel, Field
+from typing import Literal
 
+from langchain_openai import ChatOpenAI
+from langchain_core.prompts import ChatPromptTemplate
 from langchain_chroma import Chroma
 from langchain_openai import OpenAIEmbeddings
-from langchain_community.document_loaders import PyPDFLoader, Docx2txtLoader, TextLoader, CSVLoader
+from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.schema import Document as LCDocument
+
+
+
+
 
 
 # -------------------------------
@@ -53,6 +52,13 @@ APP_URL = "http://127.0.0.1:8000/"
 # Initialize OpenAI client
 openai.api_key = OPENAIKEY
 
+
+llm = ChatOpenAI(
+    temperature=0.7,
+    openai_api_key=OPENAIKEY,
+    model=MODEL
+)
+
 # -------------------------------
 # Chroma DB setup
 # -------------------------------
@@ -68,15 +74,154 @@ vectorstore = Chroma(
     persist_directory=CHROMA_DB_PATH,
 )
 
+class SeoAuditMetadata(BaseModel):
+    """Metadata schema for the SEO Strategic Auditor knowledge base."""
 
-# ==============================
-# 2. Split into Chunks
-# ==============================
-text_splitter = RecursiveCharacterTextSplitter(
-    chunk_size=1500,
-    chunk_overlap=200,
-    separators=["\n\n", "\n"]
-)
+    primary_topic: Literal[
+        "Core SEO Concept", "Silo Architecture", "On-Page SEO", 
+        "Keyword Research", "Link Building", "Technical SEO", "Internal Process"
+    ] = Field(description="The primary, high-level topic of the text chunk.")
+
+    specific_element: str = Field(description="The specific SEO element being discussed, e.g., 'Title Tag', 'Anchor Text', 'Physical Silo', 'Client Onboarding'.")
+    
+    content_type: Literal[
+        "Strategic Principle", "Actionable Tactic", "Explanatory Model", "Internal Guideline"
+    ] = Field(description="The nature of the information in the chunk.")
+
+    source_brand: Literal["Google", "Ahrefs", "Moz", "Bruce Clay", "Brihaspati Tech"] = Field(description="The brand or source of the document.")
+
+class PDFChunker:
+    def __init__(self, pdf_path: str):
+        self.pdf_path = pdf_path
+        
+    def clean_text(self, text: str) -> str:
+        """Clean common PDF parsing artifacts"""
+        # Replace multiple newlines with double newline
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        # Fix spacing around numbers (common OCR issue)
+        text = re.sub(r"(\d)\s+(\d)", r"\1.\2", text)
+        # Remove excessive whitespace
+        text = re.sub(r" {2,}", " ", text)
+        # Fix common hyphenation issues
+        text = re.sub(r"-\s*\n\s*", "", text)
+        return text.strip()
+    
+    def method_2_semantic_heading_splitter(self) -> List[Dict[str, Any]]:
+        """
+        Method 2: Improved Semantic Heading-Based Splitting
+        Best for: Structured documents with clear headings (like your SEO guides)
+        """
+        loader = PyPDFLoader(self.pdf_path)
+        pages = loader.load()
+        full_text = "\n".join([p.page_content for p in pages])
+        full_text = self.clean_text(full_text)
+        
+        # Enhanced heading pattern - covers more cases
+        heading_patterns = [
+            r"(?:^|\n)\s*(\d+(?:\.\d+)*\s+[A-Z][A-Za-z0-9 ,\-():]+)",  # 4.6.1 Title
+            r"(?:^|\n)\s*(Chapter\s+\d+[^\n]*)",                        # Chapter 1 Title  
+            r"(?:^|\n)\s*([A-Z][A-Z\s]{3,}[A-Z])\s*(?:\n|$)",          # ALL CAPS HEADINGS
+            r"(?:^|\n)\s*(###?\s+[^\n]+)",                              # ### Markdown headings
+            r"(?:^|\n)\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*:)\s*\n"       # Title: format
+        ]
+        
+        # Combine all patterns
+        combined_pattern = "|".join(f"({pattern})" for pattern in heading_patterns)
+        heading_regex = re.compile(combined_pattern, re.MULTILINE | re.IGNORECASE)
+        
+        chunks = []
+        last_end = 0
+        current_heading = "Introduction"
+        
+        for match in heading_regex.finditer(full_text):
+            # Add previous section
+            if last_end < match.start():
+                content = full_text[last_end:match.start()].strip()
+                if content:
+                    chunks.append({
+                        "heading": current_heading,
+                        "content": content,
+                        "start_pos": last_end,
+                        "end_pos": match.start(),
+                        "word_count": len(content.split())
+                    })
+            
+            # Update heading
+            current_heading = match.group().strip()
+            last_end = match.end()
+        
+        # Add final section
+        if last_end < len(full_text):
+            content = full_text[last_end:].strip()
+            if content:
+                chunks.append({
+                    "heading": current_heading,
+                    "content": content,
+                    "start_pos": last_end,
+                    "end_pos": len(full_text),
+                    "word_count": len(content.split())
+                })
+        
+        return chunks
+    
+    
+    def method_4_hybrid_approach(self, max_chunk_size: int = 3000, min_chunk_size: int = 500) -> List[Dict[str, Any]]:
+        """
+        Method 4: Hybrid Semantic + Size-Based Splitting
+        Best for: When you want semantic chunks but with size constraints
+        """
+        # First, get semantic chunks
+        semantic_chunks = self.method_2_semantic_heading_splitter()
+        
+        final_chunks = []
+        
+        for chunk in semantic_chunks:
+            content = chunk['content']
+            heading = chunk['heading']
+            
+            # If chunk is too large, split it further
+            if len(content) > max_chunk_size:
+                text_splitter = RecursiveCharacterTextSplitter(
+                    chunk_size=max_chunk_size,
+                    chunk_overlap=200,
+                    separators=["\n\n", "\n", ". ", " ", ""]
+                )
+                
+                sub_docs = text_splitter.create_documents([content])
+                
+                for i, sub_doc in enumerate(sub_docs):
+                    final_chunks.append({
+                        'heading': f"{heading} (Part {i+1})",
+                        'content': sub_doc.page_content,
+                        'word_count': len(sub_doc.page_content.split()),
+                        'chunk_type': 'hybrid_split',
+                        'parent_heading': heading
+                    })
+            
+            # If chunk is too small, consider merging (optional)
+            elif len(content) < min_chunk_size and final_chunks:
+                # Merge with previous chunk if from same section
+                if final_chunks[-1].get('parent_heading') == heading:
+                    final_chunks[-1]['content'] += f"\n\n{content}"
+                    final_chunks[-1]['word_count'] += len(content.split())
+                else:
+                    final_chunks.append({
+                        'heading': heading,
+                        'content': content,
+                        'word_count': len(content.split()),
+                        'chunk_type': 'semantic',
+                        'parent_heading': heading
+                    })
+            else:
+                final_chunks.append({
+                    'heading': heading,
+                    'content': content,
+                    'word_count': len(content.split()),
+                    'chunk_type': 'semantic',
+                    'parent_heading': heading
+                })
+        
+        return final_chunks
 
 # -------------------------------
 # Document storage configuration
@@ -84,74 +229,6 @@ text_splitter = RecursiveCharacterTextSplitter(
 UPLOAD_DIR = os.path.join(settings.MEDIA_ROOT, 'documents')
 if not os.path.exists(UPLOAD_DIR):
     os.makedirs(UPLOAD_DIR)
-
-
-def extract_text_and_split(file_path, file_extension, base_metadata):
-    """
-    Extract text based on file type and split by paragraphs.
-    """
-    docs = []
-
-    # PDF
-    if file_extension == "pdf":
-        loader = PyPDFLoader(file_path)
-        pages = loader.load()
-        for i, page in enumerate(pages):
-            paragraphs = [p.strip() for p in page.page_content.split("\n\n") if p.strip()]
-            for j, para in enumerate(paragraphs):
-                meta = base_metadata.copy()
-                meta.update({
-                    "page": i,
-                    "chunk_index": j,
-                    "chunk_type": "paragraph",
-                    "chunk_size": len(para),
-                })
-                docs.append(LCDocument(page_content=para, metadata=meta))
-
-    # DOCX
-    elif file_extension == "docx":
-        loader = Docx2txtLoader(file_path)
-        pages = loader.load()
-        text = " ".join([p.page_content for p in pages])
-        paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
-        for i, para in enumerate(paragraphs):
-            meta = base_metadata.copy()
-            meta.update({
-                "chunk_index": i,
-                "chunk_type": "paragraph",
-                "chunk_size": len(para),
-            })
-            docs.append(LCDocument(page_content=para, metadata=meta))
-
-    # TXT
-    elif file_extension == "txt":
-        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-            content = f.read()
-        paragraphs = [p.strip() for p in content.split("\n\n") if p.strip()]
-        for i, para in enumerate(paragraphs):
-            meta = base_metadata.copy()
-            meta.update({
-                "chunk_index": i,
-                "chunk_type": "paragraph",
-                "chunk_size": len(para),
-            })
-            docs.append(LCDocument(page_content=para, metadata=meta))
-
-    # CSV (each row as a paragraph)
-    elif file_extension == "csv":
-        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-            rows = f.readlines()
-        for i, row in enumerate(rows):
-            meta = base_metadata.copy()
-            meta.update({
-                "chunk_index": i,
-                "chunk_type": "row",
-                "chunk_size": len(row),
-            })
-            docs.append(LCDocument(page_content=row.strip(), metadata=meta))
-
-    return docs
-
 
 def save_docs_to_json_and_chroma(docs, base_dir="documents", filename=None):
     """
@@ -190,8 +267,6 @@ def save_docs_to_json_and_chroma(docs, base_dir="documents", filename=None):
     print(f"✅ Stored {len(enriched_docs)} chunks in ChromaDB")
 
     return output_file
-
-
 
 # -------------------------------
 # Chat history view
@@ -291,8 +366,34 @@ def upload_documents(request):
                 "upload_date": timezone.now().isoformat()
             }
 
+            chunker = PDFChunker(file_path)
+            chunks_method4 = chunker.method_4_hybrid_approach()
+            print(f"Generated {len(chunks_method4)} chunks")
+            docs = []
+            for i, chunk in enumerate(chunks_method4):
+                
+                meta = base_metadata.copy()
+                meta.update({
+                    "chunk_index": i,
+                    "heading": chunk.get("heading"),
+                    "parent_heading": chunk.get("parent_heading"),
+                    "chunk_type": chunk.get("chunk_type", "hybrid"),
+                    "word_count": chunk.get("word_count", 0),
+                })
 
-            docs = extract_text_and_split(file_path, file_extension, base_metadata)
+                # Auto-generate structured metadata with LLM
+                try:
+                    llm_metadata = generate_chunk_label(chunk["content"])
+
+                    print(llm_metadata)
+                    # merge Pydantic object into dict
+                    meta.update(llm_metadata.model_dump())
+                except Exception as e:
+                    print(f"⚠️ Metadata generation failed for chunk {i}: {e}")
+
+                docs.append(LCDocument(page_content=chunk["content"], metadata=meta))
+
+            #docs = extract_text_and_split(file_path, file_extension, base_metadata)
             savefile = save_docs_to_json_and_chroma(docs, base_dir="documents")
 
             print(f"Split into {len(docs)} chunks with metadata")
@@ -318,6 +419,44 @@ def upload_documents(request):
         'total_errors': len(errors)
     })
 
+
+def generate_chunk_label(content: str) -> str:
+    
+    # 1. Get the schema definition from your Pydantic model
+    schema_definition = json.dumps(SeoAuditMetadata.model_json_schema(), indent=2)
+
+    # 2. The prompt template
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", """
+        You are an expert SEO analyst and a meticulous data processor. Your task is to analyze a given text chunk and extract structured metadata from it.
+        
+        You must strictly adhere to the following JSON schema. Do not add any fields that are not in the schema. Ensure the values you provide for 'primary_topic', 'content_type', and 'source_brand' are ONLY from the allowed 'Literal' options.
+
+        Respond ONLY with a single, valid JSON object. Do not include any other text, explanations, or apologies in your response.
+
+        JSON Schema:
+        {pydantic_schema}
+        """),
+        ("human", """
+        Please analyze the following text chunk and generate the corresponding JSON object.
+
+        --- TEXT CHUNK ---
+        {chunk_text}
+        --- END TEXT CHUNK ---
+        """)
+    ])
+
+    # 3. Create the chain (assuming 'llm' is your initialized ChatOpenAI model)
+    extraction_chain = prompt | llm.with_structured_output(SeoAuditMetadata)
+
+    # The .invoke method will correctly format the prompt with these variables
+    generated_metadata = extraction_chain.invoke({
+        "chunk_text": content,
+        "pydantic_schema": schema_definition
+    })
+
+    return generated_metadata
+
 # -------------------------------
 # List uploaded documents
 # -------------------------------
@@ -342,6 +481,10 @@ def list_documents(request):
                         unique_docs[doc_id] = {
                             "id": doc_id,
                             "name": metadata.get("original_name", ""),
+                            "primary_topic": metadata.get("primary_topic", ""),
+                            "specific_element": metadata.get("specific_element", ""),
+                            "content_type": metadata.get("content_type", ""),
+                            "source_brand": metadata.get("source_brand", ""),
                             "size": metadata.get("file_size", 0),
                             "type": metadata.get("file_type", ""),
                             "upload_date": metadata.get("upload_date", ""),
