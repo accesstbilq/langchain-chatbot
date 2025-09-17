@@ -384,8 +384,7 @@ def upload_documents(request):
                 # Auto-generate structured metadata with LLM
                 try:
                     llm_metadata = generate_chunk_label(chunk["content"])
-
-                    print(llm_metadata)
+                    print(f"Json for chunk {i}: {llm_metadata}")
                     # merge Pydantic object into dict
                     meta.update(llm_metadata.model_dump())
                 except Exception as e:

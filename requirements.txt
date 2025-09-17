@@ -19,3 +19,4 @@ openpyxl
 python-pptx
 psycopg2-binary
 langchain-experimental
+pydantic
