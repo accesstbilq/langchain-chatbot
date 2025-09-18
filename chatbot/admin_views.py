@@ -96,6 +96,11 @@ class PDFChunker:
         
     def clean_text(self, text: str) -> str:
         """Clean common PDF parsing artifacts"""
+        # Remove PDFCrowd + navigation junk
+        text = re.sub(r"Explore our developer-friendly.*?(?=\n)", "", text, flags=re.DOTALL)
+        text = re.sub(r"(PREVIOUS|NEXT)\s*", "", text)
+        text = re.sub(r"https?://\S+", "", text)   # remove URLs
+
         # Replace multiple newlines with double newline
         text = re.sub(r"\n{3,}", "\n\n", text)
         # Fix spacing around numbers (common OCR issue)
@@ -120,7 +125,7 @@ class PDFChunker:
         heading_patterns = [
             r"(?:^|\n)\s*(\d+(?:\.\d+)*\s+[A-Z][A-Za-z0-9 ,\-():]+)",  # 4.6.1 Title
             r"(?:^|\n)\s*(Chapter\s+\d+[^\n]*)",                        # Chapter 1 Title  
-            r"(?:^|\n)\s*([A-Z][A-Z\s]{3,}[A-Z])\s*(?:\n|$)",          # ALL CAPS HEADINGS
+            #r"(?:^|\n)\s*([A-Z][A-Z\s]{3,}[A-Z])\s*(?:\n|$)",          # ALL CAPS HEADINGS
             r"(?:^|\n)\s*(###?\s+[^\n]+)",                              # ### Markdown headings
             r"(?:^|\n)\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*:)\s*\n"       # Title: format
         ]
@@ -165,7 +170,7 @@ class PDFChunker:
         return chunks
     
     
-    def method_4_hybrid_approach(self, max_chunk_size: int = 3000, min_chunk_size: int = 500) -> List[Dict[str, Any]]:
+    def method_4_hybrid_approach(self, max_chunk_size: int = 8000, min_chunk_size: int = 8000) -> List[Dict[str, Any]]:
         """
         Method 4: Hybrid Semantic + Size-Based Splitting
         Best for: When you want semantic chunks but with size constraints

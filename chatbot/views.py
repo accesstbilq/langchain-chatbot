@@ -26,6 +26,8 @@ warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 from bs4 import BeautifulSoup
 import ast
 from typing import List, Dict, Any
+from pydantic import BaseModel, Field
+from typing import Literal
 
 # LangChain & OpenAI integration
 from langchain_openai import ChatOpenAI
@@ -36,6 +38,7 @@ from openai import OpenAIError, APITimeoutError
 from langchain_community.document_loaders.sitemap import SitemapLoader
 from langchain_chroma import Chroma
 from langchain_openai import OpenAIEmbeddings
+from langchain_core.prompts import ChatPromptTemplate
 
 from .admin_views import load_chat_history_from_db
 
@@ -163,6 +166,22 @@ name_request_message = """🙏 **Please provide your name first!**
     **What's your name?** 
     Once you share your name, I'll be able to provide personalized SEO assistance, keyword research, content optimization strategies, and much more! 🚀✨"""
 
+
+class SeoAuditMetadata(BaseModel):
+    """Metadata schema for the SEO Strategic Auditor knowledge base."""
+
+    primary_topic: Literal[
+        "Core SEO Concept", "Silo Architecture", "On-Page SEO", 
+        "Keyword Research", "Link Building", "Technical SEO", "Internal Process"
+    ] = Field(description="The primary, high-level topic of the text chunk.")
+
+    specific_element: str = Field(description="The specific SEO element being discussed, e.g., 'Title Tag', 'Anchor Text', 'Physical Silo', 'Client Onboarding'.")
+    
+    content_type: Literal[
+        "Strategic Principle", "Actionable Tactic", "Explanatory Model", "Internal Guideline"
+    ] = Field(description="The nature of the information in the chunk.")
+
+    source_brand: Literal["Google", "Ahrefs", "Moz", "Bruce Clay", "Brihaspati Tech"] = Field(description="The brand or source of the document.")
 
 # =============================
 # Custom Tool Functions
@@ -589,13 +608,11 @@ def chatbot_input(request):
             if ids_str:
                 documentid = f"against the document id {ids_str}"
 
-            
-        reg_result = get_relevant_documents(usermessage,session_id)
-        print(reg_result)
-            
 
+        # Auto-generate structured metadata with LLM
+        llm_metadata = generate_chunk_label(usermessage)
 
-
+        reg_result = get_relevant_documents(usermessage,llm_metadata,session_id)
 
         # Initialize or get existing chat history for this session
         if session_id not in chat_history:
@@ -1638,24 +1655,72 @@ def serialize_messages(messages):
 # -------------------------------
 # Enhanced RAG functions
 # -------------------------------
-def get_relevant_documents(query: str, session_id: str = None, n_results: int = 5) -> List[Dict[str, Any]]:
+def get_relevant_documents(query: str, llm_metadata: dict, session_id: str = None, n_results: int = 4) -> List[Dict[str, Any]]:
     """Get relevant documents for RAG using semantic search with chapter information."""
     try:
-        results = vectorstore.similarity_search(query, k=n_results)
+
+        # Fix: Access dictionary keys instead of Pydantic model attributes
+        primary_topic = llm_metadata.get("primary_topic")
+        source_brand = llm_metadata.get("source_brand")
+
+        # Add validation to ensure required fields exist
+        if not primary_topic or not source_brand:
+            print(f"Warning: Missing required metadata fields. primary_topic: {primary_topic}, source_brand: {source_brand}")
+            # Fallback to search without filters if metadata is incomplete
+            results = vectorstore.similarity_search(query, k=n_results)
+        else:
+            # Use proper Chroma filter syntax with $and operator
+            # filter_condition = {
+            #     "$or": [
+            #         {"source_brand": {"$eq": source_brand}},
+            #         {"primary_topic": {"$eq": primary_topic}}
+            #     ]
+            # }
+
+            filter_condition = {"primary_topic": {"$eq": primary_topic}}
+            
+            try:
+                results = vectorstore.similarity_search(
+                    query, 
+                    k=n_results,
+                    filter=filter_condition
+                )
+            except Exception as filter_error:
+                print(f"Filter search failed: {filter_error}")
+                # Fallback to unfiltered search
+                results = vectorstore.similarity_search(query, k=n_results)
 
         relevant_docs = []
+        seen_content = set()  # Track seen content to avoid duplicates
+        seen_combinations = set()  # Track document_id + chunk_index combinations
+        
         for doc in results:
             metadata = doc.metadata
+            content = doc.page_content.strip()
+            
+            # Create unique identifiers for deduplication
+            content_hash = hash(content)
+            doc_chunk_combo = f"{metadata.get('document_id', '')}_{metadata.get('chunk_index', 0)}"
+            
+            # # Skip if we've seen this exact content or document chunk combination
+            # if content_hash in seen_content or doc_chunk_combo in seen_combinations:
+            #     continue
+                
+            # # Skip very short or empty content
+            # if len(content) < 50:
+            #     continue
+                
+            # Add to tracking sets
+            seen_content.add(content_hash)
+            seen_combinations.add(doc_chunk_combo)
+            
             relevant_docs.append({
-                "content": doc.page_content,
-                "source": metadata.get("original_name", ""),
-                "file_type": metadata.get("file_type", ""),
+                "content": content,
                 "document_id": metadata.get("document_id", ""),
-                "chunk_type": metadata.get("chunk_type", ""),
-                "chunk_index": metadata.get("chunk_index", 0),
-                "chapter_title": metadata.get("chapter_title", ""),
-                "chapter_number": metadata.get("chapter_number", ""),
-                "section_header": metadata.get("section_header", "")
+                "source_brand": metadata.get("source_brand", ""),
+                "primary_topic": metadata.get("primary_topic", ""),
+                "content_type": metadata.get("content_type", ""),
+                "specific_element": metadata.get("specific_element", ""),
             })
 
         return relevant_docs
@@ -1663,3 +1728,46 @@ def get_relevant_documents(query: str, session_id: str = None, n_results: int = 
     except Exception as e:
         print(f"Error retrieving relevant documents: {str(e)}")
         return []
+
+def generate_chunk_label(content: str) -> str:
+    
+    llm = ChatOpenAI(
+        temperature=0.7,
+        openai_api_key=OPENAIKEY,
+        model=MODEL
+    )
+
+    # 1. Get the schema definition from your Pydantic model
+    schema_definition = json.dumps(SeoAuditMetadata.model_json_schema(), indent=2)
+
+    # 2. The prompt template
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", """
+        You are an expert SEO analyst and a meticulous data processor. Your task is to analyze a given text chunk and extract structured metadata from it.
+        
+        You must strictly adhere to the following JSON schema. Do not add any fields that are not in the schema. Ensure the values you provide for 'primary_topic', 'content_type', and 'source_brand' are ONLY from the allowed 'Literal' options.
+
+        Respond ONLY with a single, valid JSON object. Do not include any other text, explanations, or apologies in your response.
+
+        JSON Schema:
+        {pydantic_schema}
+        """),
+        ("human", """
+        Please analyze the following text chunk and generate the corresponding JSON object.
+
+        --- TEXT CHUNK ---
+        {chunk_text}
+        --- END TEXT CHUNK ---
+        """)
+    ])
+
+    # 3. Create the chain (assuming 'llm' is your initialized ChatOpenAI model)
+    extraction_chain = prompt | llm.with_structured_output(SeoAuditMetadata)
+
+    # The .invoke method will correctly format the prompt with these variables
+    generated_metadata = extraction_chain.invoke({
+        "chunk_text": content,
+        "pydantic_schema": schema_definition
+    })
+
+    return generated_metadata.dict()
